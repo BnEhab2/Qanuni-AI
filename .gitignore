@@ -1,0 +1,8 @@
+__pycache__/
+chroma_db/
+scraper/
+data/
+full_response.txt
+Thumbs.db
+.DS_Store
+.env
