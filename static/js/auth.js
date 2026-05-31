@@ -177,7 +177,7 @@ const Auth = {
             // Logged in: show profile info
             const nameInitial = user.name ? user.name.charAt(0).toUpperCase() : (user.email ? user.email.charAt(0).toUpperCase() : "U");
             const isTest = user.email.toLowerCase() === "test";
-            const testBadge = isTest ? '<span style="background: var(--accent-red); color: #fff; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; margin-top: 2px;">حساب خاص ⚖️</span>' : `<span class="profile-email">${escapeHtml(user.email)}</span>`;
+            const testBadge = isTest ? '<span style="background: var(--accent-red); color: #fff; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: 700; width: fit-content; margin-top: 2px;">حساب خاص</span>' : `<span class="profile-email">${escapeHtml(user.email)}</span>`;
             
             profileContainer.innerHTML = `
                 <div class="profile-info">

@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.venv
+venv
+__pycache__/
+chroma_db/
+data/
+scraper/
+*.log
+*.zip
+*.db
+full_response.txt

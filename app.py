@@ -25,7 +25,7 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 print(f"[*] API Key loaded: {'YES (length={})'.format(len(API_KEY)) if API_KEY else 'NO'}")
-PORT = 5000
+PORT = int(os.getenv("PORT", 5000))
 
 from config import (
     EMBEDDING_MODEL,
@@ -35,7 +35,46 @@ from config import (
     RERANKER_TOP_K,
     CONVERSATION_MEMORY_MAX_TURNS,
     TORCH_NUM_THREADS,
+    MERGED_CORPUS_PATH,
 )
+
+# ── Dynamic Database Downloader (For HuggingFace Spaces Deployment) ────
+import urllib.request
+import zipfile
+
+def _check_and_download_db():
+    chroma_path = Path(CHROMA_DB_PATH)
+    data_path = Path(MERGED_CORPUS_PATH)
+    
+    chroma_url = os.getenv("HF_CHROMA_DB_URL")
+    corpus_url = os.getenv("HF_CORPUS_URL")
+    
+    if chroma_url and not chroma_path.exists():
+        print(f"[*] HuggingFace Space: ChromaDB missing. Downloading: {chroma_url}...")
+        try:
+            zip_tmp = chroma_path.parent / "chroma_db_temp.zip"
+            zip_tmp.parent.mkdir(parents=True, exist_ok=True)
+            
+            urllib.request.urlretrieve(chroma_url, zip_tmp)
+            print("    Extracting database...")
+            with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
+                zip_ref.extractall(chroma_path.parent)
+                
+            os.remove(zip_tmp)
+            print("[+] ChromaDB downloaded and extracted successfully!")
+        except Exception as e:
+            print(f"[!] Error downloading ChromaDB: {e}")
+            
+    if corpus_url and not data_path.exists():
+        print(f"[*] HuggingFace Space: Legal corpus missing. Downloading: {corpus_url}...")
+        try:
+            data_path.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(corpus_url, data_path)
+            print("[+] Legal corpus downloaded successfully!")
+        except Exception as e:
+            print(f"[!] Error downloading corpus: {e}")
+
+_check_and_download_db()
 import chromadb
 from sentence_transformers import SentenceTransformer
 

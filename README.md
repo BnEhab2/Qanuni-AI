@@ -1,3 +1,12 @@
+---
+title: Qanuni AI
+emoji: ⚖️
+colorFrom: red
+colorTo: black
+sdk: docker
+app_port: 7860
+---
+
 # Qanuni.AI
 ### Smart Legal AI Assistant for Egyptian Law
 **Qanuni.AI** is a sophisticated, Generative AI-powered legal expert system designed specifically to assist lawyers, judges, and legal consultants in Egypt. It leverages advanced Retrieval-Augmented Generation (RAG) to analyze complex legal cases and derive highly accurate arguments directly from official statutory texts.
