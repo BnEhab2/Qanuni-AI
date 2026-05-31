@@ -49,8 +49,9 @@ def _check_and_download_db():
     chroma_url = os.getenv("HF_CHROMA_DB_URL")
     corpus_url = os.getenv("HF_CORPUS_URL")
     
-    if chroma_url and not chroma_path.exists():
-        print(f"[*] HuggingFace Space: ChromaDB missing. Downloading: {chroma_url}...")
+    db_file = chroma_path / "chroma.sqlite3"
+    if chroma_url and (not chroma_path.exists() or not db_file.exists()):
+        print(f"[*] HuggingFace Space: ChromaDB missing or incomplete. Downloading: {chroma_url}...")
         try:
             zip_tmp = chroma_path.parent / "chroma_db_temp.zip"
             zip_tmp.parent.mkdir(parents=True, exist_ok=True)
