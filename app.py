@@ -42,6 +42,20 @@ from config import (
 import urllib.request
 import zipfile
 
+def _download_file(url, dest_path):
+    req = urllib.request.Request(url)
+    hf_token = os.getenv("HF_TOKEN")
+    if hf_token:
+        req.add_header("Authorization", f"Bearer {hf_token}")
+    
+    with urllib.request.urlopen(req) as response, open(dest_path, 'wb') as out_file:
+        chunk_size = 1024 * 1024  # 1MB
+        while True:
+            chunk = response.read(chunk_size)
+            if not chunk:
+                break
+            out_file.write(chunk)
+
 def _check_and_download_db():
     chroma_path = Path(CHROMA_DB_PATH)
     data_path = Path(MERGED_CORPUS_PATH)
@@ -56,7 +70,7 @@ def _check_and_download_db():
             zip_tmp = chroma_path.parent / "chroma_db_temp.zip"
             zip_tmp.parent.mkdir(parents=True, exist_ok=True)
             
-            urllib.request.urlretrieve(chroma_url, zip_tmp)
+            _download_file(chroma_url, zip_tmp)
             print("    Extracting database...")
             with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
                 zip_ref.extractall(chroma_path.parent)
@@ -70,7 +84,7 @@ def _check_and_download_db():
         print(f"[*] HuggingFace Space: Legal corpus missing. Downloading: {corpus_url}...")
         try:
             data_path.parent.mkdir(parents=True, exist_ok=True)
-            urllib.request.urlretrieve(corpus_url, data_path)
+            _download_file(corpus_url, data_path)
             print("[+] Legal corpus downloaded successfully!")
         except Exception as e:
             print(f"[!] Error downloading corpus: {e}")
