@@ -1,30 +1,20 @@
 """
-Qanuni.AI — Flask Backend (v2.0)
-==================================
-Egyptian Legal AI Agent with:
-    - Hybrid retrieval (ChromaDB semantic + BM25 keyword)
-    - Cross-encoder reranking (BAAI/bge-reranker-v2-m3)
-    - Multi-step legal reasoning chain
-    - Tool-based agent architecture
-    - Persistent case memory (SQLite)
-    - Conversational context memory
-    - Legal citation support
-    - CPU optimization (batching, caching, async)
-
-Supports unified legal corpus from multiple HuggingFace datasets.
+Qanuni.AI — Main Application Launcher
+======================================
+Sets up NLP & ML models, loads RAG pipeline components,
+and launches the Flask application factory.
 """
 
 import os
 import sys
-import json
-import uuid
+import gc
 import inspect
 import asyncio
 import threading
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, render_template
-from flask_cors import CORS
+from flask import jsonify, request
 
 # Fix Windows terminal encoding for Arabic / emoji output
 if sys.platform.startswith("win"):
@@ -95,10 +85,13 @@ if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
     threading.Thread(target=_warm_up_services, daemon=True).start()
 
 
+# Share embedding model instance with CaseMemory to save ~400MB RAM
 from core.memory import get_case_memory
 
 print("[*] Initializing Case Memory (SQLite)...")
 _case_memory = get_case_memory()
+# Inject the pre-loaded embedding model to prevent duplicate loading
+_case_memory.embed_model = _embed_model
 
 from core.reasoning import LegalReasoningChain
 
@@ -178,7 +171,6 @@ def search_laws(query: str, top_k: int = RERANKER_TOP_K,
 
     Returns the top-k most relevant chunks with metadata and citations.
     """
-    # Step 1: Hybrid retrieval (wider candidate set)
     results = tool_search_laws(
         query=query,
         retriever=_retriever,
@@ -188,7 +180,8 @@ def search_laws(query: str, top_k: int = RERANKER_TOP_K,
         type_filter=type_filter,
         category_filter=category_filter,
     )
-
+    # Trigger garbage collection after heavy NLP retrieval / reranking to keep memory usage low
+    gc.collect()
     return results
 
 
@@ -341,21 +334,17 @@ async def _run_agent_async(
     web_search_hint: str = "",
 ) -> str:
     """Send a message to the root agent and collect the response asynchronously."""
-    # Build context block with rich metadata from retrieval pipeline
     context_parts: list[str] = []
 
-    # Add conversation history context
     if conversation_context:
         context_parts.append(conversation_context)
         context_parts.append("")
 
-    # Add reasoning chain context
     if reasoning_context:
         context_parts.append("### تحليل منهجي متعدد الخطوات:")
         context_parts.append(reasoning_context)
         context_parts.append("")
 
-    # Add retrieved law excerpts
     context_parts.append("### النصوص القانونية المسترجعة:")
     for i, ex in enumerate(law_excerpts, 1):
         excerpt_header = (
@@ -365,14 +354,12 @@ async def _run_agent_async(
             f"Type: {ex.get('type', '')}\n"
             f"Categories: {ex['categories']}\n"
         )
-        # Add citation
         citation = ex.get("citation", format_citation(ex))
         excerpt_header += f"Citation: {citation}\n"
 
         if ex.get('summary'):
             excerpt_header += f"Summary: {ex['summary'][:300]}\n"
 
-        # Add retrieval method and scores
         if ex.get("retrieval_method"):
             excerpt_header += f"Retrieval: {ex['retrieval_method']}\n"
         if ex.get("reranker_score") is not None:
@@ -384,19 +371,16 @@ async def _run_agent_async(
     if not law_excerpts:
         context_parts.append("(لا توجد نصوص قانونية مطابقة في قاعدة البيانات.)")
 
-    # Add citation instructions
     if citation_block:
         context_parts.append(citation_block)
 
     context_block = "\n".join(context_parts)
 
-    # Add web search hint if user enabled it
     if web_search_hint:
         prompt = f"{context_block}\n\n{web_search_hint}\n\n### User Question:\n{user_message}"
     else:
         prompt = f"{context_block}\n\n### User Question:\n{user_message}"
 
-    # Use a stateless random session ID for each API call to prevent conversation crosstalk
     user_id = "default_user"
     session_id = str(uuid.uuid4())
 
@@ -437,7 +421,6 @@ def ask_llm(
     citation_block: str = "",
     web_search_hint: str = "",
 ) -> str:
-    """Send user question + retrieved law excerpts to the unified GeminiAgent and return the response."""
     return run_async(
         _run_agent_async(
             user_message,
@@ -449,135 +432,30 @@ def ask_llm(
         )
     )
 
+# ── Flask Application Creation ────────────────────────────────────────
+from api import create_app
+from api.chat import init_chat_services
 
-app = Flask(__name__)
-CORS(app)
+app = create_app()
 
+# Inject the model-related singletons & functions into the chat blueprint
+init_chat_services(
+    search_laws_fn=search_laws,
+    ask_llm_fn=ask_llm,
+    conversation_memory=_conversation_memory,
+    case_memory=_case_memory,
+    reasoning_chain_class=LegalReasoningChain,
+    format_citation_fn=format_citation,
+    build_citation_block_fn=build_citation_block,
+    run_async_fn=run_async,
+    session_service=session_service,
+    runner=runner,
+    debate_runner_prosecution=debate_runner_prosecution,
+    debate_runner_defense=debate_runner_defense,
+    types_module=types,
+)
 
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
-@app.route("/api/chat", methods=["POST"])
-def chat():
-    data = request.get_json(force=True)
-    user_message = data.get("message", "").strip()
-    if not user_message:
-        return jsonify({"error": "Empty message"}), 400
-
-    # Optional metadata filters from the frontend
-    source_filter   = data.get("source_filter")
-    type_filter     = data.get("type_filter")
-    category_filter = data.get("category_filter")
-
-    # Session ID for conversational memory (from frontend or auto-generated)
-    session_id = data.get("session_id", "default_session")
-
-    # ── Step 1: Get conversational context ──────────────────────────
-    conversation_context = _conversation_memory.get_context(session_id)
-
-    # ── Step 2: Run reasoning chain (fact identification + classification) ──
-    reasoning_chain = LegalReasoningChain()
-    chain_result = None
-    reasoning_context = ""
-
-    try:
-        # Quick classification to potentially refine retrieval
-        facts = reasoning_chain.identify_facts(user_message)
-        classification = reasoning_chain.classify_case(facts)
-        detected_category = classification.get("primary_category", "other")
-
-        # Use detected category as filter if confident
-        if detected_category != "other" and not category_filter:
-            # Don't force filter — let hybrid retrieval handle it
-            pass
-    except Exception as e:
-        print(f"[!] Reasoning chain pre-analysis error: {e}")
-        detected_category = "other"
-
-    # ── Step 3: Hybrid retrieval + reranking ─────────────────────────
-    results = search_laws(
-        user_message,
-        source_filter=source_filter,
-        type_filter=type_filter,
-        category_filter=category_filter,
-    )
-
-    # ── Step 4: Complete reasoning chain with retrieved results ──────
-    try:
-        chain_result = reasoning_chain.run_full_chain(user_message, results)
-        reasoning_context = chain_result.get("reasoning_context", "")
-        detected_category = chain_result.get("primary_category", detected_category)
-    except Exception as e:
-        print(f"[!] Reasoning chain error: {e}")
-
-    # ── Step 5: Build citation block ────────────────────────────────
-    citation_block = build_citation_block(results)
-
-    # ── Step 5.5: Build web search hint if enabled ──────────────────
-    web_search_enabled = data.get("web_search", False)
-    web_search_hint = ""
-    if web_search_enabled:
-        web_search_hint = (
-            "### تعليمات إضافية:\n"
-            "المستخدم فعّل البحث على الإنترنت. "
-            "استخدم أدوات البحث المتاحة لك (search_web أو search_court_rulings أو search_legal_news) "
-            "للبحث عن معلومات إضافية على الإنترنت تكمل النصوص المسترجعة من قاعدة البيانات."
-        )
-
-    # ── Step 6: Ask the LLM with full context ───────────────────────
-    answer = ask_llm(
-        user_message,
-        results,
-        reasoning_context=reasoning_context,
-        conversation_context=conversation_context,
-        citation_block=citation_block,
-        web_search_hint=web_search_hint,
-    )
-
-    # ── Step 7: Update conversational memory ────────────────────────
-    _conversation_memory.add_turn(session_id, "user", user_message)
-    _conversation_memory.add_turn(session_id, "assistant", answer)
-
-    # ── Step 8: Save to case memory (async, non-blocking) ───────────
-    try:
-        _case_memory.save_case_memory(
-            user_query=user_message,
-            case_summary=answer[:1000],
-            retrieved_laws=results,
-            reasoning=reasoning_context,
-            category=detected_category,
-        )
-    except Exception as e:
-        print(f"[!] Case memory save error: {e}")
-
-    # ── Step 9: Build source citations with unified metadata ────────
-    sources = []
-    seen = set()
-    for r in results:
-        key = f"{r.get('source', '')}:{r['law_name']}"
-        if key not in seen:
-            seen.add(key)
-            sources.append({
-                "law_name":       r["law_name"],
-                "categories":     r["categories"],
-                "source":         r.get("source", ""),
-                "type":           r.get("type", ""),
-                "citation":       r.get("citation", format_citation(r)),
-                "article_number": r.get("article_number", ""),
-                "snippet":        r["text"][:300] + ("…" if len(r["text"]) > 300 else ""),
-                "reranker_score": round(r.get("reranker_score", 0), 4),
-                "retrieval_method": r.get("retrieval_method", ""),
-            })
-
-    return jsonify({
-        "answer": answer,
-        "sources": sources,
-        "classification": detected_category,
-        "session_id": session_id,
-    })
-
+# ── Backwards Compatible Direct Case Memory & Tool Endpoints ───────────
 
 @app.route("/api/case-memory/<int:case_id>", methods=["GET"])
 def get_case(case_id: int):
@@ -650,115 +528,8 @@ def web_search():
     })
 
 
-@app.route("/api/conversation/clear", methods=["POST"])
-def clear_conversation():
-    """Clear conversational memory for a session."""
-    data = request.get_json(force=True)
-    session_id = data.get("session_id", "default_session")
-    _conversation_memory.clear(session_id)
-    return jsonify({"status": "cleared", "session_id": session_id})
-
-
-@app.route("/api/debate", methods=["POST"])
-def debate():
-    data = request.get_json(force=True)
-    user_message = data.get("message", "").strip()
-    case_description = data.get("case_description", "").strip()
-    session_id = data.get("session_id", "debate_" + str(uuid.uuid4())[:8])
-    user_role = data.get("user_role", "defense")
-
-    if not user_message and not case_description:
-        return jsonify({"error": "أرسل رسالة أو وصف القضية"}), 400
-
-    if user_role == "prosecution":
-        chosen_runner = debate_runner_defense
-        app_name = "qanuni_debate_defense"
-        user_label = "حجة النيابة (المستخدم)"
-    else:
-        chosen_runner = debate_runner_prosecution
-        app_name = "qanuni_debate_prosecution"
-        user_label = "حجة الدفاع (المستخدم)"
-
-    # Build the debate prompt with case context
-    conversation_context = _conversation_memory.get_context(session_id)
-
-    # Retrieve relevant laws for the case
-    search_query = case_description if case_description else user_message
-    results = search_laws(search_query)
-
-    # Build law excerpts for context
-    law_context_parts = []
-    if case_description:
-        law_context_parts.append(f"### وصف القضية:\n{case_description}\n")
-
-    if conversation_context:
-        law_context_parts.append(conversation_context)
-
-    law_context_parts.append("### النصوص القانونية المسترجعة:")
-    for i, ex in enumerate(results, 1):
-        law_context_parts.append(
-            f"--- Excerpt {i} ---\n"
-            f"Law: {ex['law_name']}\n"
-            f"Citation: {ex.get('citation', format_citation(ex))}\n"
-            f"Text: {ex['text'][:1500]}\n"
-        )
-
-    context_block = "\n".join(law_context_parts)
-    prompt = f"{context_block}\n\n### {user_label}:\n{user_message}"
-
-    # Run through the debate agent
-    async def _run_debate():
-        uid = "debate_user"
-        sid = str(uuid.uuid4())
-        sess_result = session_service.create_session(
-            app_name=app_name, user_id=uid, session_id=sid,
-        )
-        if inspect.iscoroutine(sess_result):
-            session = await sess_result
-        else:
-            session = sess_result
-
-        content = types.Content(
-            role="user", parts=[types.Part.from_text(text=prompt)],
-        )
-        parts = []
-        async for event in chosen_runner.run_async(
-            user_id=uid, session_id=session.id, new_message=content,
-        ):
-            if event.content and event.content.parts:
-                for p in event.content.parts:
-                    if p.text:
-                        parts.append(p.text)
-        return "\n".join(parts) if parts else "مفيش رد متاح."
-
-    answer = run_async(_run_debate())
-
-    # Save to conversation memory for continuity
-    _conversation_memory.add_turn(session_id, "user", user_message)
-    _conversation_memory.add_turn(session_id, "assistant", answer)
-
-    sources = []
-    seen = set()
-    for r in results:
-        key = f"{r.get('source', '')}:{r['law_name']}"
-        if key not in seen:
-            seen.add(key)
-            sources.append({
-                "law_name": r["law_name"],
-                "citation": r.get("citation", format_citation(r)),
-                "snippet": r["text"][:300],
-            })
-
-    return jsonify({
-        "answer": answer,
-        "sources": sources,
-        "session_id": session_id,
-        "mode": "debate",
-    })
-
-
 if __name__ == "__main__":
     print(f"\n>>> Qanuni.AI v3.1 server starting on http://localhost:{PORT}")
     print("    Model: GPT-4o-mini via OpenRouter")
-    print("    Features: Hybrid Retrieval | Reranking | Reasoning Chain | Case Memory | Debate Mode | Web Search (DuckDuckGo)")
+    print("    Architecture: Refactored (Blueprints + SQLite auth & history persistence)")
     app.run(host="0.0.0.0", port=PORT, debug=True)

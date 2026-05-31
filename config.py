@@ -1,9 +1,11 @@
 """
 Qanuni.AI — Centralized Configuration
 All constants for the RAG pipeline: datasets, embeddings, ChromaDB, chunking,
-reranking, hybrid retrieval, case memory, and reasoning chain.
+reranking, hybrid retrieval, case memory, reasoning chain, auth, and security.
 """
 
+import os
+import secrets
 from pathlib import Path
 
 # Paths
@@ -56,11 +58,11 @@ CASE_MEMORY_DB_PATH = str(BASE_DIR / "data" / "case_memory.db")
 CASE_MEMORY_SIMILAR_TOP_K = 3  # max similar cases to retrieve
 
 # Conversational Context Memory
-CONVERSATION_MEMORY_MAX_TURNS = 5   # max user/assistant turn pairs to keep
+CONVERSATION_MEMORY_MAX_TURNS = 3   # max user/assistant turn pairs to keep (reduced for RAM)
 
-# CPU Optimization
-EMBEDDING_CACHE_SIZE = 256    # LRU cache entries for embedding vectors
-TORCH_NUM_THREADS   = 8      # PyTorch intra-op parallelism threads
+# CPU Optimization (tuned for RTX 3050 / 16GB RAM)
+EMBEDDING_CACHE_SIZE = 128    # LRU cache entries for embedding vectors
+TORCH_NUM_THREADS   = 4      # PyTorch intra-op parallelism threads (reduced for 16GB RAM)
 
 # Legal Reasoning Chain Categories
 LEGAL_CATEGORIES = [
@@ -88,4 +90,24 @@ WEB_SEARCH_LEGAL_DOMAINS = [       # trusted Egyptian legal sources
     "laweg.net",
     "elwatannews.com",
     "youm7.com",
+]
+
+# ── Auth & Security ───────────────────────────────────────────────────
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_hex(32))
+JWT_ACCESS_TOKEN_EXPIRES = 86400    # 24 hours (local system, long sessions)
+BCRYPT_LOG_ROUNDS = 12
+GUEST_MESSAGE_LIMIT = 5             # max messages before requiring signup
+RATE_LIMIT_PER_MINUTE = 15          # max API requests per minute per IP
+
+# Input sanitization
+MAX_INPUT_LENGTH = 2000
+PROMPT_INJECTION_PATTERNS = [
+    r"ignore\s+(previous|above|all)",
+    r"system\s*prompt",
+    r"you\s+are\s+now",
+    r"forget\s+(everything|instructions)",
+    r"<script",
+    r"javascript:",
+    r"disregard",
+    r"override\s+instructions",
 ]
