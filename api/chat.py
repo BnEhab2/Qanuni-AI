@@ -1,8 +1,6 @@
 """
-Qanuni.AI — Chat API Endpoints
-================================
-Main chat endpoint + SSE streaming + debate mode.
-Integrates auth, guest limits, conversation persistence.
+Qanuni.AI — Chat Endpoints
+Main chat, SSE streaming, and debate mode.
 """
 
 import json
@@ -31,7 +29,7 @@ from config import GUEST_MESSAGE_LIMIT
 
 chat_bp = Blueprint("chat", __name__)
 
-# These will be injected by app.py after model initialization
+# Injected by app.py after model initialization
 _services = {}
 
 
@@ -50,7 +48,7 @@ def init_chat_services(
     debate_runner_defense,
     types_module,
 ):
-    """Inject initialized services from app.py. Called once at startup."""
+    """Inject initialized services from app.py."""
     _services["search_laws"] = search_laws_fn
     _services["ask_llm"] = ask_llm_fn
     _services["conversation_memory"] = conversation_memory
@@ -67,19 +65,16 @@ def init_chat_services(
 
 
 def _auto_title(text: str) -> str:
-    """Generate an auto-title from the first message."""
+    """Short title from first message."""
     clean = text.strip()
-    if len(clean) > 40:
-        return clean[:40] + "..."
-    return clean
+    return clean[:40] + "..." if len(clean) > 40 else clean
 
 
 @chat_bp.route("/api/chat", methods=["POST"])
 @rate_limit(max_per_minute=15)
 @require_auth_or_guest
 def chat():
-    """Main chat endpoint with auth, guest limits, and persistence."""
-    # ── Step 0: Guest limit enforcement ─────────────────────────
+    """Main chat endpoint."""
     allowed, remaining, error = enforce_guest_limit()
     if not allowed:
         return error
@@ -89,22 +84,18 @@ def chat():
     if not user_message:
         return jsonify({"error": "الرسالة فارغة."}), 400
 
-    # Sanitize input
     user_message, has_injection = sanitize_input(user_message)
     if has_injection:
-        print(f"[Security] Prompt injection attempt detected from {request.remote_addr}")
+        print(f"[Security] Injection attempt from {request.remote_addr}")
 
-    # Optional filters
     source_filter = data.get("source_filter")
     type_filter = data.get("type_filter")
     category_filter = data.get("category_filter")
     web_search_enabled = data.get("web_search", False)
-
-    # Conversation management
     conversation_id = data.get("conversation_id")
     session_id = data.get("session_id", "default_session")
 
-    # Create conversation if needed
+    # Create or validate conversation
     if not conversation_id:
         conversation_id = create_conversation(
             user_id=g.user_id,
@@ -112,7 +103,6 @@ def chat():
             title=_auto_title(user_message),
         )
     else:
-        # Verify ownership
         conv = get_conversation(conversation_id)
         if conv:
             if g.user_id and conv["user_id"] != g.user_id:
@@ -120,17 +110,15 @@ def chat():
             if g.guest_id and conv["guest_id"] != g.guest_id:
                 return jsonify({"error": "غير مصرح."}), 403
         else:
-            # Conversation doesn't exist, create new one
             conversation_id = create_conversation(
                 user_id=g.user_id,
                 guest_id=g.guest_id,
                 title=_auto_title(user_message),
             )
 
-    # Persist user message
     add_message(conversation_id, "user", user_message)
 
-    # ── Core pipeline (same as original app.py) ─────────────────
+    # Get services
     search_laws = _services["search_laws"]
     ask_llm = _services["ask_llm"]
     conversation_memory = _services["conversation_memory"]
@@ -139,10 +127,10 @@ def chat():
     format_citation = _services["format_citation"]
     build_citation_block = _services["build_citation_block"]
 
-    # Step 1: Conversational context
+    # Step 1: Conversation context
     conversation_context = conversation_memory.get_context(session_id)
 
-    # Step 2: Reasoning chain
+    # Step 2: Reasoning chain (pre-analysis)
     reasoning_chain = LegalReasoningChain()
     reasoning_context = ""
     detected_category = "other"
@@ -152,9 +140,9 @@ def chat():
         classification = reasoning_chain.classify_case(facts)
         detected_category = classification.get("primary_category", "other")
     except Exception as e:
-        print(f"[!] Reasoning chain pre-analysis error: {e}")
+        print(f"[!] Reasoning pre-analysis error: {e}")
 
-    # Step 3: Hybrid retrieval + reranking
+    # Step 3: Retrieval
     results = search_laws(
         user_message,
         source_filter=source_filter,
@@ -162,7 +150,7 @@ def chat():
         category_filter=category_filter,
     )
 
-    # Step 4: Complete reasoning chain
+    # Step 4: Full reasoning chain
     try:
         chain_result = reasoning_chain.run_full_chain(user_message, results)
         reasoning_context = chain_result.get("reasoning_context", "")
@@ -170,7 +158,7 @@ def chat():
     except Exception as e:
         print(f"[!] Reasoning chain error: {e}")
 
-    # Step 5: Citation block
+    # Step 5: Citations
     citation_block = build_citation_block(results)
 
     # Step 5.5: Web search hint
@@ -193,7 +181,7 @@ def chat():
         web_search_hint=web_search_hint,
     )
 
-    # Step 7: Update conversational memory
+    # Step 7: Update memory
     conversation_memory.add_turn(session_id, "user", user_message)
     conversation_memory.add_turn(session_id, "assistant", answer)
 
@@ -207,7 +195,7 @@ def chat():
             category=detected_category,
         )
     except Exception as e:
-        print(f"[!] Case memory save error: {e}")
+        print(f"[!] Case memory error: {e}")
 
     # Step 9: Build sources
     sources = []
@@ -228,13 +216,9 @@ def chat():
                 "retrieval_method": r.get("retrieval_method", ""),
             })
 
-    # Persist assistant message
     add_message(conversation_id, "assistant", answer, sources)
-
-    # Increment guest count AFTER successful response
     new_remaining = increment_guest_count()
 
-    # Auto-title: update conversation title from first message
     conv = get_conversation(conversation_id)
     if conv and conv["title"] == "محادثة جديدة":
         update_conversation_title(conversation_id, _auto_title(user_message))
@@ -254,7 +238,6 @@ def chat():
 @require_auth_or_guest
 def chat_stream():
     """SSE streaming chat endpoint."""
-    # Guest limit check
     allowed, remaining, error = enforce_guest_limit()
     if not allowed:
         return error
@@ -273,7 +256,6 @@ def chat_stream():
     conversation_id = data.get("conversation_id")
     session_id = data.get("session_id", "default_session")
 
-    # Create/validate conversation (same logic as non-streaming)
     user_id = g.user_id
     guest_id = g.guest_id
     auth_type = g.auth_type
@@ -285,7 +267,6 @@ def chat_stream():
             title=_auto_title(user_message),
         )
 
-    # Persist user message
     add_message(conversation_id, "user", user_message)
 
     def generate():
@@ -301,7 +282,6 @@ def chat_stream():
         types = _services["types"]
 
         try:
-            # Retrieval pipeline (non-streaming, fast)
             conversation_context = conversation_memory.get_context(session_id)
 
             reasoning_chain = LegalReasoningChain()
@@ -331,7 +311,7 @@ def chat_stream():
 
             citation_block = build_citation_block(results)
 
-            # Build sources and send them first
+            # Build sources
             sources = []
             seen = set()
             for r in results:
@@ -350,7 +330,7 @@ def chat_stream():
             yield f"data: {json.dumps({'type': 'sources', 'data': sources}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'classification', 'data': detected_category})}\n\n"
 
-            # Build LLM prompt (same as _run_agent_async)
+            # Build LLM prompt
             context_parts = []
             if conversation_context:
                 context_parts.append(conversation_context)
@@ -362,13 +342,12 @@ def chat_stream():
 
             context_parts.append("### النصوص القانونية المسترجعة:")
             for i, ex in enumerate(results, 1):
-                excerpt = (
+                context_parts.append(
                     f"--- Excerpt {i} ---\n"
                     f"Law: {ex['law_name']}\n"
                     f"Source: {ex.get('source', '')}\n"
                     f"Text: {ex['text'][:1500]}\n"
                 )
-                context_parts.append(excerpt)
 
             if not results:
                 context_parts.append("(لا توجد نصوص قانونية مطابقة في قاعدة البيانات.)")
@@ -391,7 +370,7 @@ def chat_stream():
             else:
                 prompt = f"{context_block}\n\n### User Question:\n{user_message}"
 
-            # Stream LLM response
+            # Stream from agent
             async def _stream_agent():
                 uid = "default_user"
                 sid = str(uuid.uuid4())
@@ -408,19 +387,18 @@ def chat_stream():
                     parts=[types.Part.from_text(text=prompt)],
                 )
 
-                collected_parts = []
+                parts = []
                 async for event in runner_obj.run_async(
                     user_id=uid, session_id=session.id, new_message=content,
                 ):
                     if event.content and event.content.parts:
                         for part in event.content.parts:
                             if part.text:
-                                collected_parts.append(part.text)
-                return collected_parts
+                                parts.append(part.text)
+                return parts
 
             response_parts = run_async(_stream_agent())
 
-            # Send tokens
             full_response = ""
             for part_text in response_parts:
                 full_response += part_text
@@ -430,14 +408,10 @@ def chat_stream():
                 full_response = "عذراً، مفيش رد متاح دلوقتي."
                 yield f"data: {json.dumps({'type': 'token', 'data': full_response}, ensure_ascii=False)}\n\n"
 
-            # Update memories
             conversation_memory.add_turn(session_id, "user", user_message)
             conversation_memory.add_turn(session_id, "assistant", full_response)
-
-            # Persist assistant message
             add_message(conversation_id, "assistant", full_response, sources)
 
-            # Save to case memory
             try:
                 case_memory.save_case_memory(
                     user_query=user_message,
@@ -449,7 +423,6 @@ def chat_stream():
             except Exception:
                 pass
 
-            # Increment guest count
             if auth_type == "guest" and guest_id:
                 from api.models import increment_guest_usage
                 new_count = increment_guest_usage(guest_id)
@@ -478,7 +451,7 @@ def chat_stream():
 @rate_limit(max_per_minute=15)
 @require_auth_or_guest
 def debate():
-    """Debate endpoint with auth and persistence."""
+    """Debate endpoint — AI plays prosecution or defense."""
     allowed, remaining, error = enforce_guest_limit()
     if not allowed:
         return error
@@ -497,7 +470,6 @@ def debate():
     if case_description:
         case_description, _ = sanitize_input(case_description)
 
-    # Create conversation if needed
     if not conversation_id:
         conversation_id = create_conversation(
             user_id=g.user_id,
@@ -508,7 +480,6 @@ def debate():
 
     add_message(conversation_id, "user", user_message)
 
-    # Services
     search_laws = _services["search_laws"]
     conversation_memory = _services["conversation_memory"]
     format_citation = _services["format_citation"]
@@ -529,21 +500,21 @@ def debate():
     search_query = case_description if case_description else user_message
     results = search_laws(search_query)
 
-    law_context_parts = []
+    law_parts = []
     if case_description:
-        law_context_parts.append(f"### وصف القضية:\n{case_description}\n")
+        law_parts.append(f"### وصف القضية:\n{case_description}\n")
     if conversation_context:
-        law_context_parts.append(conversation_context)
-    law_context_parts.append("### النصوص القانونية المسترجعة:")
+        law_parts.append(conversation_context)
+    law_parts.append("### النصوص القانونية المسترجعة:")
     for i, ex in enumerate(results, 1):
-        law_context_parts.append(
+        law_parts.append(
             f"--- Excerpt {i} ---\n"
             f"Law: {ex['law_name']}\n"
             f"Citation: {ex.get('citation', format_citation(ex))}\n"
             f"Text: {ex['text'][:1500]}\n"
         )
 
-    context_block = "\n".join(law_context_parts)
+    context_block = "\n".join(law_parts)
     prompt = f"{context_block}\n\n### {user_label}:\n{user_message}"
 
     async def _run_debate():

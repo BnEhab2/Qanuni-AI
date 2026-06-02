@@ -1,8 +1,6 @@
 """
-Qanuni.AI — Auth API Endpoints
-================================
-Lightweight authentication: signup, login, JWT, guest sessions.
-Includes guest-to-user conversation migration on signup.
+Qanuni.AI — Auth Endpoints
+Signup, login, JWT, guest sessions.
 """
 
 import re
@@ -27,27 +25,21 @@ auth_bp = Blueprint("auth", __name__)
 
 
 def _validate_email(email: str) -> bool:
-    """Basic email format validation."""
     return bool(re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email))
 
 
 def _hash_password(password: str) -> str:
-    """Hash password with bcrypt."""
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
 
 
 def _check_password(password: str, hashed: str) -> bool:
-    """Verify password against bcrypt hash."""
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
 
 @auth_bp.route("/api/auth/signup", methods=["POST"])
 @rate_limit(max_per_minute=5)
 def signup():
-    """
-    Register a new user account.
-    If guest_id is provided, migrates guest conversation history to the new account.
-    """
+    """Register a new user. Optionally migrates guest history."""
     data = request.get_json(force=True)
     email = data.get("email", "").strip()
     password = data.get("password", "").strip()
@@ -57,41 +49,33 @@ def signup():
     if not email or not password:
         return jsonify({"error": "البريد الإلكتروني وكلمة المرور مطلوبان."}), 400
 
-    # Specific condition/bypass for the "test" account
-    is_test_account = (email.lower() == "test")
+    is_test = (email.lower() == "test")
 
-    if not is_test_account and not _validate_email(email):
+    if not is_test and not _validate_email(email):
         return jsonify({"error": "صيغة البريد الإلكتروني غير صحيحة."}), 400
 
-    if not is_test_account and len(password) < 6:
+    if not is_test and len(password) < 6:
         return jsonify({"error": "كلمة المرور يجب أن تكون 6 أحرف على الأقل."}), 400
 
     if len(password) > 128:
         return jsonify({"error": "كلمة المرور طويلة جداً."}), 400
 
-    # Create user
     password_hash = _hash_password(password)
     user_id = create_user(email, password_hash, name)
 
     if user_id is None:
         return jsonify({"error": "هذا البريد الإلكتروني مسجل بالفعل."}), 409
 
-    # Migrate guest conversations to new account
     migrated = 0
     if guest_id:
         migrated = migrate_guest_to_user(guest_id, user_id)
 
-    # Issue JWT
     token = create_access_token(identity=str(user_id))
     update_last_login(user_id)
 
     return jsonify({
         "token": token,
-        "user": {
-            "id": user_id,
-            "email": email,
-            "name": name,
-        },
+        "user": {"id": user_id, "email": email, "name": name},
         "migrated_conversations": migrated,
         "message": "تم إنشاء الحساب بنجاح!",
     }), 201
@@ -116,22 +100,16 @@ def login():
     if not _check_password(password, user["password"]):
         return jsonify({"error": "بيانات الدخول غير صحيحة."}), 401
 
-    # Migrate guest conversations on login too
     migrated = 0
     if guest_id:
         migrated = migrate_guest_to_user(guest_id, user["id"])
 
-    # Issue JWT
     token = create_access_token(identity=str(user["id"]))
     update_last_login(user["id"])
 
     return jsonify({
         "token": token,
-        "user": {
-            "id": user["id"],
-            "email": user["email"],
-            "name": user["name"],
-        },
+        "user": {"id": user["id"], "email": user["email"], "name": user["name"]},
         "migrated_conversations": migrated,
     })
 
@@ -164,7 +142,7 @@ def me():
 @auth_bp.route("/api/auth/guest", methods=["POST"])
 @rate_limit(max_per_minute=20)
 def guest_status():
-    """Check guest usage status. Returns remaining messages."""
+    """Check guest usage — remaining messages."""
     data = request.get_json(force=True)
     guest_id = data.get("guest_id", "").strip()
 

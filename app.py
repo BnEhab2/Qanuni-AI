@@ -1,8 +1,6 @@
 """
-Qanuni.AI — Main Application Launcher
-======================================
-Sets up NLP & ML models, loads RAG pipeline components,
-and launches the Flask application factory.
+Qanuni.AI — Main App
+Loads models, sets up RAG pipeline, launches Flask server.
 """
 
 import os
@@ -16,7 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import jsonify, request
 
-# Fix Windows terminal encoding for Arabic / emoji output
+# Fix Windows terminal encoding
 if sys.platform.startswith("win"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -38,7 +36,7 @@ from config import (
     MERGED_CORPUS_PATH,
 )
 
-# ── Dynamic Database Downloader (For HuggingFace Spaces Deployment) ────
+# ── Download DB for HuggingFace Spaces ────────────────────────────────
 import urllib.request
 import zipfile
 
@@ -47,49 +45,48 @@ def _download_file(url, dest_path):
     hf_token = os.getenv("HF_TOKEN")
     if hf_token:
         req.add_header("Authorization", f"Bearer {hf_token}")
-    
-    with urllib.request.urlopen(req) as response, open(dest_path, 'wb') as out_file:
-        chunk_size = 1024 * 1024  # 1MB
+
+    with urllib.request.urlopen(req) as response, open(dest_path, 'wb') as out:
         while True:
-            chunk = response.read(chunk_size)
+            chunk = response.read(1024 * 1024)
             if not chunk:
                 break
-            out_file.write(chunk)
+            out.write(chunk)
 
 def _check_and_download_db():
     chroma_path = Path(CHROMA_DB_PATH)
     data_path = Path(MERGED_CORPUS_PATH)
-    
+
     chroma_url = os.getenv("HF_CHROMA_DB_URL")
     corpus_url = os.getenv("HF_CORPUS_URL")
-    
+
     db_file = chroma_path / "chroma.sqlite3"
     if chroma_url and (not chroma_path.exists() or not db_file.exists()):
-        print(f"[*] HuggingFace Space: ChromaDB missing or incomplete. Downloading: {chroma_url}...")
+        print(f"[*] Downloading ChromaDB: {chroma_url}...")
         try:
             zip_tmp = chroma_path.parent / "chroma_db_temp.zip"
             zip_tmp.parent.mkdir(parents=True, exist_ok=True)
-            
             _download_file(chroma_url, zip_tmp)
-            print("    Extracting database...")
-            with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
-                zip_ref.extractall(chroma_path.parent)
-                
+            print("    Extracting...")
+            with zipfile.ZipFile(zip_tmp, 'r') as zf:
+                zf.extractall(chroma_path.parent)
             os.remove(zip_tmp)
-            print("[+] ChromaDB downloaded and extracted successfully!")
+            print("[+] ChromaDB ready!")
         except Exception as e:
-            print(f"[!] Error downloading ChromaDB: {e}")
-            
+            print(f"[!] ChromaDB download error: {e}")
+
     if corpus_url and not data_path.exists():
-        print(f"[*] HuggingFace Space: Legal corpus missing. Downloading: {corpus_url}...")
+        print(f"[*] Downloading corpus: {corpus_url}...")
         try:
             data_path.parent.mkdir(parents=True, exist_ok=True)
             _download_file(corpus_url, data_path)
-            print("[+] Legal corpus downloaded successfully!")
+            print("[+] Corpus ready!")
         except Exception as e:
-            print(f"[!] Error downloading corpus: {e}")
+            print(f"[!] Corpus download error: {e}")
 
 _check_and_download_db()
+
+# ── Load Models ───────────────────────────────────────────────────────
 import chromadb
 from sentence_transformers import SentenceTransformer
 
@@ -102,11 +99,11 @@ _embed_model = SentenceTransformer(EMBEDDING_MODEL)
 print(f"[*] Connecting to ChromaDB at: {CHROMA_DB_PATH}")
 _chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 _collection = _chroma_client.get_collection(name=CHROMA_COLLECTION)
-print(f"[+] ChromaDB collection '{CHROMA_COLLECTION}' loaded — {_collection.count()} documents")
+print(f"[+] Collection '{CHROMA_COLLECTION}' loaded — {_collection.count()} documents")
 
 from core.retrieval import HybridRetriever, get_hybrid_retriever
 
-print("[*] Initializing Hybrid Retriever (semantic + BM25)...")
+print("[*] Initializing Hybrid Retriever...")
 _retriever = get_hybrid_retriever(
     embed_model=_embed_model,
     chroma_client=_chroma_client,
@@ -115,36 +112,28 @@ _retriever = get_hybrid_retriever(
 
 from core.reranker import get_reranker
 
-print("[*] Reranker registered (lazy-load on first query)")
+print("[*] Reranker registered (lazy-load)")
 _reranker = get_reranker()
 
-# Background thread to warm up models and build indexes asynchronously
-def _warm_up_services():
+# Background warmup
+def _warm_up():
     try:
-        print("[Warmup] Background warmup started...")
-        # 1. Warm up embedding model
+        print("[Warmup] Starting...")
         _embed_model.encode("تحميل")
-        
-        # 2. Warm up BM25 index (this will load cache from disk in 1-2s!)
         _retriever._build_bm25_index()
-        
-        # 3. Warm up Reranker (this will lazy load BAAI/bge-reranker-v2-m3 in the background)
         _reranker._ensure_model()
-        print("[Warmup] Background warmup completed! All services ready in-memory.")
+        print("[Warmup] Done!")
     except Exception as e:
-        print(f"[Warmup] Error during background warmup: {e}")
+        print(f"[Warmup] Error: {e}")
 
-# Only run warmup in the main Werkzeug worker process to avoid running twice in debug mode
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-    threading.Thread(target=_warm_up_services, daemon=True).start()
+    threading.Thread(target=_warm_up, daemon=True).start()
 
-
-# Share embedding model instance with CaseMemory to save ~400MB RAM
+# Share embedding model with CaseMemory
 from core.memory import get_case_memory
 
-print("[*] Initializing Case Memory (SQLite)...")
+print("[*] Initializing Case Memory...")
 _case_memory = get_case_memory()
-# Inject the pre-loaded embedding model to prevent duplicate loading
 _case_memory.embed_model = _embed_model
 
 from core.reasoning import LegalReasoningChain
@@ -166,12 +155,9 @@ from core.web_search import (
     search_legal_news as tool_search_legal_news,
 )
 
+
 class ConversationMemory:
-    """
-    Per-session conversational context memory.
-    Maintains a sliding window of the last N user/assistant turns.
-    Thread-safe with a lock per session.
-    """
+    """Per-session sliding window of recent user/assistant turns."""
 
     def __init__(self, max_turns: int = CONVERSATION_MEMORY_MAX_TURNS):
         self._max_turns = max_turns
@@ -179,21 +165,18 @@ class ConversationMemory:
         self._lock = threading.Lock()
 
     def add_turn(self, session_id: str, role: str, content: str):
-        """Add a user or assistant message to the session history."""
         with self._lock:
             if session_id not in self._sessions:
                 self._sessions[session_id] = []
             self._sessions[session_id].append({
                 "role": role,
-                "content": content[:2000],  # Limit per-turn size
+                "content": content[:2000],
             })
-            # Keep only last N turns (each turn = user + assistant pair)
-            max_messages = self._max_turns * 2
-            if len(self._sessions[session_id]) > max_messages:
-                self._sessions[session_id] = self._sessions[session_id][-max_messages:]
+            max_msgs = self._max_turns * 2
+            if len(self._sessions[session_id]) > max_msgs:
+                self._sessions[session_id] = self._sessions[session_id][-max_msgs:]
 
     def get_context(self, session_id: str) -> str:
-        """Build a context string from the session history."""
         with self._lock:
             history = self._sessions.get(session_id, [])
 
@@ -202,29 +185,24 @@ class ConversationMemory:
 
         parts = ["### سياق المحادثة السابقة:"]
         for msg in history:
-            role_label = "المستخدم" if msg["role"] == "user" else "المستشار"
-            parts.append(f"**{role_label}**: {msg['content'][:500]}")
+            label = "المستخدم" if msg["role"] == "user" else "المستشار"
+            parts.append(f"**{label}**: {msg['content'][:500]}")
 
         return "\n".join(parts)
 
     def clear(self, session_id: str):
-        """Clear a session's history."""
         with self._lock:
             self._sessions.pop(session_id, None)
 
 
 _conversation_memory = ConversationMemory()
 
+
 def search_laws(query: str, top_k: int = RERANKER_TOP_K,
                 source_filter: str | None = None,
                 type_filter: str | None = None,
                 category_filter: str | None = None) -> list[dict]:
-    """
-    Full retrieval pipeline:
-        Query → Hybrid Retrieval → Reranker → Citations → Final Results
-
-    Returns the top-k most relevant chunks with metadata and citations.
-    """
+    """Full retrieval pipeline: query → hybrid → rerank → results."""
     results = tool_search_laws(
         query=query,
         retriever=_retriever,
@@ -234,7 +212,6 @@ def search_laws(query: str, top_k: int = RERANKER_TOP_K,
         type_filter=type_filter,
         category_filter=category_filter,
     )
-    # Trigger garbage collection after heavy NLP retrieval / reranking to keep memory usage low
     gc.collect()
     return results
 
@@ -292,12 +269,12 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-# ── Language Model Setup ──────────────────────────────────────────────
+# ── LLM Setup ─────────────────────────────────────────────────────────
 openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
 gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
 
 if openrouter_key:
-    print("[*] Configuring google-adk LiteLlm agent with OpenRouter (gpt-4o-mini)...")
+    print("[*] Using OpenRouter (gpt-4o-mini)")
     llm = LiteLlm(
         model="openrouter/openai/gpt-4o-mini",
         api_key=openrouter_key,
@@ -306,7 +283,7 @@ if openrouter_key:
         max_output_tokens=2048,
     )
 elif gemini_key:
-    print("[*] Configuring google-adk LiteLlm agent with native Gemini (fallback)...")
+    print("[*] Using Gemini (fallback)")
     llm = LiteLlm(
         model="gemini/gemini-1.5-flash",
         api_key=gemini_key,
@@ -314,7 +291,7 @@ elif gemini_key:
         max_output_tokens=2048,
     )
 else:
-    print("[!] WARNING: No API key configured. Agent fallback to offline/empty.")
+    print("[!] WARNING: No API key configured!")
     llm = LiteLlm(
         model="openrouter/openai/gpt-4o-mini",
         api_key="",
@@ -323,20 +300,15 @@ else:
         max_output_tokens=2048,
     )
 
-# ── Main Agent Definition ─────────────────────────────────────────────
+# ── Agents ────────────────────────────────────────────────────────────
 qanuni_agent = LlmAgent(
     name="qanuni_agent",
     model=llm,
     description="Qanuni.AI — Egyptian Legal AI Agent",
     instruction=SYSTEM_PROMPT,
-    tools=[
-        tool_search_web,
-        tool_search_court_rulings,
-        tool_search_legal_news,
-    ],
+    tools=[tool_search_web, tool_search_court_rulings, tool_search_legal_news],
 )
 
-# ── Debate Agent Definition ──────────────────────────────────────────
 debate_agent_prosecution = LlmAgent(
     name="qanuni_debate_prosecution",
     model=llm,
@@ -351,13 +323,9 @@ debate_agent_defense = LlmAgent(
     instruction=DEBATE_PROMPT_DEFENSE,
 )
 
-# ── ADK Session & Runner Setup ────────────────────────────────────────
+# ── ADK Session & Runners ────────────────────────────────────────────
 session_service = InMemorySessionService()
-runner = Runner(
-    agent=qanuni_agent,
-    app_name="qanuni",
-    session_service=session_service,
-)
+runner = Runner(agent=qanuni_agent, app_name="qanuni", session_service=session_service)
 debate_runner_prosecution = Runner(
     agent=debate_agent_prosecution,
     app_name="qanuni_debate_prosecution",
@@ -369,15 +337,14 @@ debate_runner_defense = Runner(
     session_service=session_service,
 )
 
-# ── Persistent Event Loop for running async coroutines ────────────────
+# ── Async Event Loop ─────────────────────────────────────────────────
 _loop = asyncio.new_event_loop()
-_loop_thread = threading.Thread(target=_loop.run_forever, daemon=True)
-_loop_thread.start()
+threading.Thread(target=_loop.run_forever, daemon=True).start()
 
 def run_async(coro):
     """Run an async coroutine on the persistent event loop."""
-    future = asyncio.run_coroutine_threadsafe(coro, _loop)
-    return future.result(timeout=120)
+    return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout=120)
+
 
 async def _run_agent_async(
     user_message: str,
@@ -387,7 +354,7 @@ async def _run_agent_async(
     citation_block: str = "",
     web_search_hint: str = "",
 ) -> str:
-    """Send a message to the root agent and collect the response asynchronously."""
+    """Send a message to the agent and collect the response."""
     context_parts: list[str] = []
 
     if conversation_context:
@@ -401,7 +368,7 @@ async def _run_agent_async(
 
     context_parts.append("### النصوص القانونية المسترجعة:")
     for i, ex in enumerate(law_excerpts, 1):
-        excerpt_header = (
+        header = (
             f"--- Excerpt {i} ---\n"
             f"Law: {ex['law_name']}\n"
             f"Source: {ex.get('source', '')}\n"
@@ -409,18 +376,17 @@ async def _run_agent_async(
             f"Categories: {ex['categories']}\n"
         )
         citation = ex.get("citation", format_citation(ex))
-        excerpt_header += f"Citation: {citation}\n"
+        header += f"Citation: {citation}\n"
 
         if ex.get('summary'):
-            excerpt_header += f"Summary: {ex['summary'][:300]}\n"
-
+            header += f"Summary: {ex['summary'][:300]}\n"
         if ex.get("retrieval_method"):
-            excerpt_header += f"Retrieval: {ex['retrieval_method']}\n"
+            header += f"Retrieval: {ex['retrieval_method']}\n"
         if ex.get("reranker_score") is not None:
-            excerpt_header += f"Reranker Score: {ex['reranker_score']:.4f}\n"
+            header += f"Reranker Score: {ex['reranker_score']:.4f}\n"
 
-        excerpt_header += f"Text: {ex['text'][:1500]}\n"
-        context_parts.append(excerpt_header)
+        header += f"Text: {ex['text'][:1500]}\n"
+        context_parts.append(header)
 
     if not law_excerpts:
         context_parts.append("(لا توجد نصوص قانونية مطابقة في قاعدة البيانات.)")
@@ -436,17 +402,15 @@ async def _run_agent_async(
         prompt = f"{context_block}\n\n### User Question:\n{user_message}"
 
     user_id = "default_user"
-    session_id = str(uuid.uuid4())
+    sid = str(uuid.uuid4())
 
-    session_result = session_service.create_session(
-        app_name="qanuni",
-        user_id=user_id,
-        session_id=session_id,
+    sess_result = session_service.create_session(
+        app_name="qanuni", user_id=user_id, session_id=sid,
     )
-    if inspect.iscoroutine(session_result):
-        session = await session_result
+    if inspect.iscoroutine(sess_result):
+        session = await sess_result
     else:
-        session = session_result
+        session = sess_result
 
     content = types.Content(
         role="user",
@@ -455,9 +419,7 @@ async def _run_agent_async(
 
     response_parts = []
     async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session.id,
-        new_message=content,
+        user_id=user_id, session_id=session.id, new_message=content,
     ):
         if event.content and event.content.parts:
             for part in event.content.parts:
@@ -477,8 +439,7 @@ def ask_llm(
 ) -> str:
     return run_async(
         _run_agent_async(
-            user_message,
-            law_excerpts,
+            user_message, law_excerpts,
             reasoning_context=reasoning_context,
             conversation_context=conversation_context,
             citation_block=citation_block,
@@ -486,13 +447,13 @@ def ask_llm(
         )
     )
 
-# ── Flask Application Creation ────────────────────────────────────────
+
+# ── Flask App ─────────────────────────────────────────────────────────
 from api import create_app
 from api.chat import init_chat_services
 
 app = create_app()
 
-# Inject the model-related singletons & functions into the chat blueprint
 init_chat_services(
     search_laws_fn=search_laws,
     ask_llm_fn=ask_llm,
@@ -509,11 +470,9 @@ init_chat_services(
     types_module=types,
 )
 
-# ── Backwards Compatible Direct Case Memory & Tool Endpoints ───────────
 
 @app.route("/api/case-memory/<int:case_id>", methods=["GET"])
 def get_case(case_id: int):
-    """Retrieve a stored case from memory."""
     case = _case_memory.summarize_case(case_id)
     if not case:
         return jsonify({"error": "Case not found"}), 404
@@ -522,48 +481,39 @@ def get_case(case_id: int):
 
 @app.route("/api/case-memory/search", methods=["POST"])
 def search_cases():
-    """Search for similar past cases."""
     data = request.get_json(force=True)
     query = data.get("query", "").strip()
     if not query:
         return jsonify({"error": "Empty query"}), 400
 
-    top_k = data.get("top_k", 3)
-    category = data.get("category")
-
     similar = _case_memory.retrieve_similar_cases(
-        query=query, top_k=top_k, category_filter=category
+        query=query,
+        top_k=data.get("top_k", 3),
+        category_filter=data.get("category"),
     )
     return jsonify({"cases": similar})
 
 
 @app.route("/api/case-memory/recent", methods=["GET"])
 def recent_cases():
-    """Get recent case analyses."""
     limit = request.args.get("limit", 10, type=int)
-    cases = _case_memory.get_recent_cases(limit=limit)
-    return jsonify({"cases": cases})
+    return jsonify({"cases": _case_memory.get_recent_cases(limit=limit)})
 
 
 @app.route("/api/classify", methods=["POST"])
 def classify():
-    """Classify a legal case by domain."""
     data = request.get_json(force=True)
     description = data.get("description", "").strip()
     if not description:
         return jsonify({"error": "Empty description"}), 400
-
-    chain = LegalReasoningChain()
-    result = tool_classify_case(description, chain)
-    return jsonify(result)
+    return jsonify(tool_classify_case(description, LegalReasoningChain()))
 
 
 @app.route("/api/web-search", methods=["POST"])
 def web_search():
-    """Direct web search endpoint."""
     data = request.get_json(force=True)
     query = data.get("query", "").strip()
-    search_type = data.get("type", "general")  # general, rulings, news
+    search_type = data.get("type", "general")
 
     if not query:
         return jsonify({"error": "Empty query"}), 400
@@ -575,15 +525,9 @@ def web_search():
     else:
         result = tool_search_web(query)
 
-    return jsonify({
-        "results": result,
-        "type": search_type,
-        "query": query,
-    })
+    return jsonify({"results": result, "type": search_type, "query": query})
 
 
 if __name__ == "__main__":
-    print(f"\n>>> Qanuni.AI v3.1 server starting on http://localhost:{PORT}")
-    print("    Model: GPT-4o-mini via OpenRouter")
-    print("    Architecture: Refactored (Blueprints + SQLite auth & history persistence)")
+    print(f"\n>>> Qanuni.AI v3.1 — http://localhost:{PORT}")
     app.run(host="0.0.0.0", port=PORT, debug=True)

@@ -1,12 +1,6 @@
 """
-EgyLegalAi — Web Search Tool (DuckDuckGo)
-==========================================
-ADK-compatible tool functions that let the agent search the internet
-for Egyptian legal information: laws, court rulings, legal news, etc.
-
-Uses DuckDuckGo Search (no API key required).
-
-The agent decides when to call these tools based on the user's question.
+Qanuni.AI — Web Search (DuckDuckGo)
+Lets the agent search the internet for Egyptian legal info.
 """
 
 import time
@@ -21,76 +15,55 @@ from config import (
 )
 
 
-# ── In-memory TTL cache ──────────────────────────────────────────────
-_search_cache: dict[str, tuple[float, str]] = {}
+# Simple TTL cache
+_cache: dict[str, tuple[float, str]] = {}
 _cache_lock = threading.Lock()
 
 
 def _get_cached(key: str) -> Optional[str]:
-    """Return cached result if still valid, else None."""
+    """Return cached result if still valid."""
     with _cache_lock:
-        if key in _search_cache:
-            ts, result = _search_cache[key]
+        if key in _cache:
+            ts, result = _cache[key]
             if time.time() - ts < WEB_SEARCH_CACHE_TTL:
                 return result
-            del _search_cache[key]
+            del _cache[key]
     return None
 
 
 def _set_cache(key: str, result: str):
-    """Store a result in the TTL cache."""
+    """Store result in cache."""
     with _cache_lock:
-        _search_cache[key] = (time.time(), result)
-        # Evict old entries (keep cache small)
-        if len(_search_cache) > 100:
-            oldest_key = min(_search_cache, key=lambda k: _search_cache[k][0])
-            del _search_cache[oldest_key]
+        _cache[key] = (time.time(), result)
+        if len(_cache) > 100:
+            oldest = min(_cache, key=lambda k: _cache[k][0])
+            del _cache[oldest]
 
-
-# ── Core search using DuckDuckGo ─────────────────────────────────────
 
 def _ddg_search(query: str, max_results: int = WEB_SEARCH_MAX_RESULTS) -> list[dict]:
-    """
-    Raw DuckDuckGo search. Returns list of result dicts.
-    Each dict has: title, href, body.
-    """
+    """Run a DuckDuckGo text search."""
     try:
         from duckduckgo_search import DDGS
-
         with DDGS() as ddgs:
-            results = list(ddgs.text(
-                query,
-                region="xa-ar",   # Arabic region
-                max_results=max_results,
-            ))
-        return results
+            return list(ddgs.text(query, region="xa-ar", max_results=max_results))
     except Exception as e:
-        print(f"[WebSearch] DuckDuckGo error: {e}")
+        print(f"[WebSearch] Error: {e}")
         return []
 
 
 def _ddg_news(query: str, max_results: int = WEB_SEARCH_MAX_RESULTS) -> list[dict]:
-    """
-    DuckDuckGo news search. Returns list of news result dicts.
-    Each dict has: title, url, body, date, source.
-    """
+    """Run a DuckDuckGo news search."""
     try:
         from duckduckgo_search import DDGS
-
         with DDGS() as ddgs:
-            results = list(ddgs.news(
-                query,
-                region="xa-ar",
-                max_results=max_results,
-            ))
-        return results
+            return list(ddgs.news(query, region="xa-ar", max_results=max_results))
     except Exception as e:
-        print(f"[WebSearch] DuckDuckGo news error: {e}")
+        print(f"[WebSearch] News error: {e}")
         return []
 
 
 def _format_results(results: list[dict], search_type: str = "web") -> str:
-    """Format raw DDG results into a readable string for the agent."""
+    """Format search results into readable text."""
     if not results:
         return "لم يتم العثور على نتائج."
 
@@ -111,17 +84,13 @@ def _format_results(results: list[dict], search_type: str = "web") -> str:
         if url:
             entry += f"الرابط: {url}\n"
         entry += f"المحتوى: {body}\n"
-
         parts.append(entry)
 
     header = f"[🌐 نتائج البحث على الإنترنت ({search_type}) — {len(results)} نتيجة]\n\n"
     return header + "\n".join(parts)
 
 
-# ── ADK Tool Functions ───────────────────────────────────────────────
-# These functions are registered as tools on the LlmAgent.
-# The agent calls them when it needs to search the web.
-
+# ADK Tool Functions (called by the agent)
 
 def search_web(query: str) -> str:
     """
@@ -138,18 +107,15 @@ def search_web(query: str) -> str:
     Returns:
         نتائج البحث من الإنترنت مع العناوين والروابط والمحتوى
     """
-    cache_key = f"web:{query}"
-    cached = _get_cached(cache_key)
+    cached = _get_cached(f"web:{query}")
     if cached:
         return cached
 
-    # Add legal context to the query for better results
-    legal_query = f"{query} قانون مصري"
-    results = _ddg_search(legal_query)
+    results = _ddg_search(f"{query} قانون مصري")
     formatted = _format_results(results, "بحث عام")
 
-    _set_cache(cache_key, formatted)
-    print(f"[WebSearch] General search: '{query}' → {len(results)} results")
+    _set_cache(f"web:{query}", formatted)
+    print(f"[WebSearch] General: '{query}' → {len(results)} results")
     return formatted
 
 
@@ -167,17 +133,15 @@ def search_court_rulings(query: str) -> str:
     Returns:
         أحكام المحاكم ذات الصلة مع تفاصيلها
     """
-    cache_key = f"rulings:{query}"
-    cached = _get_cached(cache_key)
+    cached = _get_cached(f"rulings:{query}")
     if cached:
         return cached
 
-    ruling_query = f"{query} حكم محكمة النقض المصرية"
-    results = _ddg_search(ruling_query)
+    results = _ddg_search(f"{query} حكم محكمة النقض المصرية")
     formatted = _format_results(results, "أحكام محاكم")
 
-    _set_cache(cache_key, formatted)
-    print(f"[WebSearch] Court rulings search: '{query}' → {len(results)} results")
+    _set_cache(f"rulings:{query}", formatted)
+    print(f"[WebSearch] Rulings: '{query}' → {len(results)} results")
     return formatted
 
 
@@ -195,20 +159,17 @@ def search_legal_news(query: str) -> str:
     Returns:
         أحدث الأخبار والتعديلات التشريعية ذات الصلة
     """
-    cache_key = f"news:{query}"
-    cached = _get_cached(cache_key)
+    cached = _get_cached(f"news:{query}")
     if cached:
         return cached
 
-    news_query = f"{query} قانون مصر"
-    results = _ddg_news(news_query)
+    results = _ddg_news(f"{query} قانون مصر")
 
     if not results:
-        # Fallback to regular search with news-oriented query
         results = _ddg_search(f"{query} تعديل قانون مصر جديد")
 
     formatted = _format_results(results, "أخبار قانونية")
 
-    _set_cache(cache_key, formatted)
-    print(f"[WebSearch] Legal news search: '{query}' → {len(results)} results")
+    _set_cache(f"news:{query}", formatted)
+    print(f"[WebSearch] News: '{query}' → {len(results)} results")
     return formatted

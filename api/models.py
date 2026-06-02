@@ -1,10 +1,6 @@
 """
 Qanuni.AI — Database Models (SQLite)
-=====================================
-Lightweight SQLite schema for users, conversations, messages,
-and guest usage tracking.
-
-Thread-safe: uses connection-per-call pattern.
+Users, conversations, messages, and guest tracking.
 """
 
 import json
@@ -17,7 +13,6 @@ from pathlib import Path
 
 from config import BASE_DIR
 
-# Database file path
 DB_PATH = str(BASE_DIR / "data" / "qanuni.db")
 
 _db_lock = threading.Lock()
@@ -25,16 +20,16 @@ _initialized = False
 
 
 def get_conn() -> sqlite3.Connection:
-    """Create a new SQLite connection for the current thread."""
+    """New SQLite connection for the current thread."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")     # Better concurrent reads
-    conn.execute("PRAGMA foreign_keys=ON")       # Enforce FK constraints
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
 def init_db():
-    """Create all tables if they don't exist. Safe to call multiple times."""
+    """Create tables if they don't exist."""
     global _initialized
     if _initialized:
         return
@@ -43,13 +38,11 @@ def init_db():
         if _initialized:
             return
 
-        # Ensure data directory exists
         Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
         conn = get_conn()
         try:
             conn.executescript("""
-                -- Users table
                 CREATE TABLE IF NOT EXISTS users (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     email       TEXT UNIQUE NOT NULL,
@@ -59,7 +52,6 @@ def init_db():
                     last_login  REAL
                 );
 
-                -- Conversations table
                 CREATE TABLE IF NOT EXISTS conversations (
                     id          TEXT PRIMARY KEY,
                     user_id     INTEGER,
@@ -71,7 +63,6 @@ def init_db():
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 );
 
-                -- Messages table
                 CREATE TABLE IF NOT EXISTS messages (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     conversation_id TEXT NOT NULL,
@@ -82,7 +73,6 @@ def init_db():
                     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
                 );
 
-                -- Guest usage tracking
                 CREATE TABLE IF NOT EXISTS guest_usage (
                     guest_id        TEXT PRIMARY KEY,
                     message_count   INTEGER DEFAULT 0,
@@ -90,7 +80,6 @@ def init_db():
                     last_seen       REAL NOT NULL
                 );
 
-                -- Indexes
                 CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id);
                 CREATE INDEX IF NOT EXISTS idx_conv_guest ON conversations(guest_id);
                 CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);
@@ -99,7 +88,7 @@ def init_db():
             """)
             conn.commit()
             _initialized = True
-            print("[DB] Qanuni database initialized successfully")
+            print("[DB] Database initialized")
         finally:
             conn.close()
 
@@ -107,7 +96,7 @@ def init_db():
 # ── User Operations ──────────────────────────────────────────────────
 
 def create_user(email: str, password_hash: str, name: str = "") -> Optional[int]:
-    """Create a new user. Returns user ID or None if email exists."""
+    """Create a new user. Returns ID or None if email exists."""
     conn = get_conn()
     try:
         cursor = conn.execute(
@@ -123,7 +112,6 @@ def create_user(email: str, password_hash: str, name: str = "") -> Optional[int]
 
 
 def get_user_by_email(email: str) -> Optional[dict]:
-    """Fetch user by email."""
     conn = get_conn()
     try:
         row = conn.execute(
@@ -135,7 +123,6 @@ def get_user_by_email(email: str) -> Optional[dict]:
 
 
 def get_user_by_id(user_id: int) -> Optional[dict]:
-    """Fetch user by ID."""
     conn = get_conn()
     try:
         row = conn.execute(
@@ -148,7 +135,6 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
 
 
 def update_last_login(user_id: int):
-    """Update user's last login timestamp."""
     conn = get_conn()
     try:
         conn.execute(
@@ -163,7 +149,7 @@ def update_last_login(user_id: int):
 # ── Guest Operations ─────────────────────────────────────────────────
 
 def get_guest_usage(guest_id: str) -> dict:
-    """Get guest usage stats. Creates entry if not exists."""
+    """Get or create guest usage entry."""
     conn = get_conn()
     try:
         row = conn.execute(
@@ -173,19 +159,13 @@ def get_guest_usage(guest_id: str) -> dict:
         if row:
             return dict(row)
 
-        # Create new guest entry
         now = time.time()
         conn.execute(
             "INSERT INTO guest_usage (guest_id, message_count, first_seen, last_seen) VALUES (?, 0, ?, ?)",
             (guest_id, now, now),
         )
         conn.commit()
-        return {
-            "guest_id": guest_id,
-            "message_count": 0,
-            "first_seen": now,
-            "last_seen": now,
-        }
+        return {"guest_id": guest_id, "message_count": 0, "first_seen": now, "last_seen": now}
     finally:
         conn.close()
 
@@ -220,7 +200,7 @@ def create_conversation(
     title: str = "محادثة جديدة",
     mode: str = "research",
 ) -> str:
-    """Create a new conversation. Returns conversation ID."""
+    """Create a new conversation. Returns its ID."""
     conv_id = str(uuid.uuid4())
     now = time.time()
     conn = get_conn()
@@ -241,7 +221,7 @@ def get_conversations(
     guest_id: Optional[str] = None,
     limit: int = 50,
 ) -> list[dict]:
-    """List conversations for a user or guest, newest first."""
+    """List conversations for a user or guest."""
     conn = get_conn()
     try:
         if user_id:
@@ -267,7 +247,6 @@ def get_conversations(
 
 
 def get_conversation(conv_id: str) -> Optional[dict]:
-    """Get a single conversation by ID."""
     conn = get_conn()
     try:
         row = conn.execute(
@@ -279,7 +258,6 @@ def get_conversation(conv_id: str) -> Optional[dict]:
 
 
 def update_conversation_title(conv_id: str, title: str):
-    """Update conversation title."""
     conn = get_conn()
     try:
         conn.execute(
@@ -292,7 +270,6 @@ def update_conversation_title(conv_id: str, title: str):
 
 
 def touch_conversation(conv_id: str):
-    """Update conversation's updated_at timestamp."""
     conn = get_conn()
     try:
         conn.execute(
@@ -305,7 +282,6 @@ def touch_conversation(conv_id: str):
 
 
 def delete_conversation(conv_id: str) -> bool:
-    """Delete a conversation and all its messages (CASCADE)."""
     conn = get_conn()
     try:
         cursor = conn.execute(
@@ -318,10 +294,7 @@ def delete_conversation(conv_id: str) -> bool:
 
 
 def migrate_guest_to_user(guest_id: str, user_id: int) -> int:
-    """
-    Migrate all guest conversations to a registered user.
-    Returns number of conversations migrated.
-    """
+    """Move all guest conversations to a registered user. Returns count."""
     conn = get_conn()
     try:
         cursor = conn.execute(
@@ -331,7 +304,7 @@ def migrate_guest_to_user(guest_id: str, user_id: int) -> int:
         conn.commit()
         count = cursor.rowcount
         if count > 0:
-            print(f"[DB] Migrated {count} conversations from guest '{guest_id}' to user {user_id}")
+            print(f"[DB] Migrated {count} conversations: guest '{guest_id}' → user {user_id}")
         return count
     finally:
         conn.close()
@@ -346,7 +319,7 @@ def search_conversations(
     """Search conversations by title or message content."""
     conn = get_conn()
     try:
-        search_term = f"%{query}%"
+        term = f"%{query}%"
         if user_id:
             rows = conn.execute(
                 """SELECT DISTINCT c.id, c.title, c.mode, c.created_at, c.updated_at
@@ -354,7 +327,7 @@ def search_conversations(
                    LEFT JOIN messages m ON m.conversation_id = c.id
                    WHERE c.user_id = ? AND (c.title LIKE ? OR m.content LIKE ?)
                    ORDER BY c.updated_at DESC LIMIT ?""",
-                (user_id, search_term, search_term, limit),
+                (user_id, term, term, limit),
             ).fetchall()
         elif guest_id:
             rows = conn.execute(
@@ -363,7 +336,7 @@ def search_conversations(
                    LEFT JOIN messages m ON m.conversation_id = c.id
                    WHERE c.guest_id = ? AND (c.title LIKE ? OR m.content LIKE ?)
                    ORDER BY c.updated_at DESC LIMIT ?""",
-                (guest_id, search_term, search_term, limit),
+                (guest_id, term, term, limit),
             ).fetchall()
         else:
             return []
@@ -395,7 +368,6 @@ def add_message(
                 time.time(),
             ),
         )
-        # Also touch the conversation
         conn.execute(
             "UPDATE conversations SET updated_at = ? WHERE id = ?",
             (time.time(), conversation_id),
@@ -430,7 +402,6 @@ def get_messages(conversation_id: str, limit: int = 200) -> list[dict]:
 
 
 def get_conversation_message_count(conversation_id: str) -> int:
-    """Get the number of messages in a conversation."""
     conn = get_conn()
     try:
         row = conn.execute(

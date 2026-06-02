@@ -1,16 +1,6 @@
 """
-EgyLegalAi — Core Case Memory Module (SQLite)
-==========================================
-Persistent storage for completed legal case analyses.
-
-Features:
-    - save_case_memory()       — store a completed analysis
-    - retrieve_similar_cases() — find past cases by embedding similarity
-    - summarize_case()         — get a structured summary of a stored case
-
-Schema:
-    id, case_summary, retrieved_laws (JSON), reasoning, category,
-    user_query, query_embedding (BLOB), created_at
+Qanuni.AI — Case Memory (SQLite)
+Stores completed legal analyses for future reference and similarity search.
 """
 
 import json
@@ -30,19 +20,19 @@ from config import (
 )
 
 
-def _serialize_embedding(embedding: list[float]) -> bytes:
-    """Pack a float list into compact binary format."""
+def _pack_embedding(embedding: list[float]) -> bytes:
+    """Pack float list into binary."""
     return struct.pack(f"{len(embedding)}f", *embedding)
 
 
-def _deserialize_embedding(data: bytes) -> list[float]:
-    """Unpack binary embedding back to float list."""
-    count = len(data) // 4  # 4 bytes per float32
+def _unpack_embedding(data: bytes) -> list[float]:
+    """Unpack binary back to float list."""
+    count = len(data) // 4
     return list(struct.unpack(f"{count}f", data))
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors."""
+    """Cosine similarity between two vectors."""
     a_arr = np.array(a, dtype=np.float32)
     b_arr = np.array(b, dtype=np.float32)
     dot = np.dot(a_arr, b_arr)
@@ -54,12 +44,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 class CaseMemoryStore:
-    """
-    Thread-safe SQLite case memory with embedding-based similarity search.
-
-    Uses a connection-per-call pattern for thread safety (SQLite connections
-    are not safe to share across threads).
-    """
+    """SQLite-based case memory with embedding similarity search."""
 
     def __init__(self, db_path: str = CASE_MEMORY_DB_PATH):
         self._db_path = db_path
@@ -67,14 +52,23 @@ class CaseMemoryStore:
         self._embed_lock = threading.Lock()
         self._init_db()
 
+    # Use property so app.py can inject the shared model
+    @property
+    def embed_model(self):
+        return self._embed_model
+
+    @embed_model.setter
+    def embed_model(self, model):
+        self._embed_model = model
+
     def _get_conn(self) -> sqlite3.Connection:
-        """Create a new connection for the current thread."""
+        """New connection per call (thread-safe)."""
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_db(self):
-        """Create the case_memory table if it doesn't exist."""
+        """Create table if needed."""
         conn = self._get_conn()
         try:
             conn.execute("""
@@ -90,11 +84,11 @@ class CaseMemoryStore:
                 )
             """)
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_case_memory_category
+                CREATE INDEX IF NOT EXISTS idx_case_category
                 ON case_memory(category)
             """)
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_case_memory_created_at
+                CREATE INDEX IF NOT EXISTS idx_case_created
                 ON case_memory(created_at)
             """)
             conn.commit()
@@ -102,7 +96,7 @@ class CaseMemoryStore:
             conn.close()
 
     def _get_embed_model(self):
-        """Lazy-load the embedding model for query encoding."""
+        """Load embedding model if not already set."""
         if self._embed_model is not None:
             return self._embed_model
 
@@ -114,18 +108,14 @@ class CaseMemoryStore:
             torch.set_num_threads(TORCH_NUM_THREADS)
 
             from sentence_transformers import SentenceTransformer
-            print(f"[CaseMemory] Loading embedding model: {EMBEDDING_MODEL}")
+            print(f"[CaseMemory] Loading model: {EMBEDDING_MODEL}")
             self._embed_model = SentenceTransformer(EMBEDDING_MODEL)
             return self._embed_model
 
     def _encode_query(self, text: str) -> list[float]:
-        """Encode a text string into an embedding vector."""
+        """Encode text into embedding vector."""
         model = self._get_embed_model()
-        embedding = model.encode(
-            text,
-            normalize_embeddings=True,
-        )
-        return embedding.tolist()
+        return model.encode(text, normalize_embeddings=True).tolist()
 
     def save_case_memory(
         self,
@@ -135,32 +125,21 @@ class CaseMemoryStore:
         reasoning: str,
         category: str = "other",
     ) -> int:
-        """
-        Store a completed case analysis in the database.
+        """Save a completed case analysis. Returns the row ID."""
+        embedding = self._encode_query(user_query)
+        blob = _pack_embedding(embedding)
 
-        Args:
-            user_query:     The original user question.
-            case_summary:   LLM-generated summary of the case.
-            retrieved_laws: List of law dicts used in the analysis.
-            reasoning:      The full reasoning/analysis text.
-            category:       Legal domain category.
-
-        Returns:
-            The ID of the inserted row.
-        """
-        query_embedding = self._encode_query(user_query)
-        embedding_blob = _serialize_embedding(query_embedding)
-
-        # Sanitize laws for JSON storage (keep only serializable fields)
-        laws_clean = []
-        for law in retrieved_laws:
-            laws_clean.append({
+        # Keep only serializable fields
+        clean_laws = [
+            {
                 "law_name":   law.get("law_name", ""),
                 "categories": law.get("categories", ""),
                 "source":     law.get("source", ""),
                 "type":       law.get("type", ""),
                 "snippet":    law.get("text", "")[:500],
-            })
+            }
+            for law in retrieved_laws
+        ]
 
         conn = self._get_conn()
         try:
@@ -174,16 +153,16 @@ class CaseMemoryStore:
                 (
                     user_query,
                     case_summary,
-                    json.dumps(laws_clean, ensure_ascii=False),
+                    json.dumps(clean_laws, ensure_ascii=False),
                     reasoning,
                     category,
-                    embedding_blob,
+                    blob,
                     time.time(),
                 ),
             )
             conn.commit()
             case_id = cursor.lastrowid
-            print(f"[CaseMemory] Saved case #{case_id} — category: {category}")
+            print(f"[CaseMemory] Saved case #{case_id} — {category}")
             return case_id
         finally:
             conn.close()
@@ -194,17 +173,7 @@ class CaseMemoryStore:
         top_k: int = CASE_MEMORY_SIMILAR_TOP_K,
         category_filter: Optional[str] = None,
     ) -> list[dict]:
-        """
-        Find the most similar past cases using embedding cosine similarity.
-
-        Args:
-            query:           The search query text.
-            top_k:           Maximum number of similar cases to return.
-            category_filter: Optional category to filter by.
-
-        Returns:
-            List of case dicts sorted by similarity (highest first).
-        """
+        """Find similar past cases by embedding cosine similarity."""
         query_embedding = self._encode_query(query)
 
         conn = self._get_conn()
@@ -224,12 +193,11 @@ class CaseMemoryStore:
         if not rows:
             return []
 
-        # Score each case by cosine similarity
         scored = []
         for row in rows:
             if row["query_embedding"]:
-                stored_emb = _deserialize_embedding(row["query_embedding"])
-                sim = _cosine_similarity(query_embedding, stored_emb)
+                stored = _unpack_embedding(row["query_embedding"])
+                sim = _cosine_similarity(query_embedding, stored)
             else:
                 sim = 0.0
 
@@ -244,20 +212,11 @@ class CaseMemoryStore:
                 "similarity":     sim,
             })
 
-        # Sort by similarity descending
         scored.sort(key=lambda x: x["similarity"], reverse=True)
         return scored[:top_k]
 
     def summarize_case(self, case_id: int) -> Optional[dict]:
-        """
-        Return a structured summary of a stored case.
-
-        Args:
-            case_id: The database ID of the case.
-
-        Returns:
-            Dict with case details, or None if not found.
-        """
+        """Get a stored case by ID."""
         conn = self._get_conn()
         try:
             row = conn.execute(
@@ -280,7 +239,7 @@ class CaseMemoryStore:
         }
 
     def get_recent_cases(self, limit: int = 10) -> list[dict]:
-        """Return the N most recent cases."""
+        """Get the N most recent cases."""
         conn = self._get_conn()
         try:
             rows = conn.execute(
@@ -302,16 +261,16 @@ class CaseMemoryStore:
         ]
 
 
-# ── Module-level singleton ─────────────────────────────────────────────
-_store_instance: Optional[CaseMemoryStore] = None
-_store_lock = threading.Lock()
+# Singleton
+_store: Optional[CaseMemoryStore] = None
+_lock = threading.Lock()
 
 
 def get_case_memory() -> CaseMemoryStore:
-    """Get or create the module-level case memory singleton."""
-    global _store_instance
-    if _store_instance is None:
-        with _store_lock:
-            if _store_instance is None:
-                _store_instance = CaseMemoryStore()
-    return _store_instance
+    """Get or create the case memory singleton."""
+    global _store
+    if _store is None:
+        with _lock:
+            if _store is None:
+                _store = CaseMemoryStore()
+    return _store

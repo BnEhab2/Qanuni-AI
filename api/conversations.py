@@ -1,7 +1,6 @@
 """
 Qanuni.AI — Conversations API
-===============================
-CRUD endpoints for persistent chat conversations.
+CRUD for persistent chat conversations.
 """
 
 from flask import Blueprint, request, jsonify, g
@@ -26,13 +25,11 @@ conversations_bp = Blueprint("conversations", __name__)
 def list_conversations():
     """List all conversations for the current user/guest."""
     limit = request.args.get("limit", 50, type=int)
-
     convs = get_conversations(
         user_id=g.user_id,
         guest_id=g.guest_id,
         limit=min(limit, 100),
     )
-
     return jsonify({"conversations": convs})
 
 
@@ -45,7 +42,6 @@ def get_single_conversation(conv_id: str):
     if not conv:
         return jsonify({"error": "المحادثة غير موجودة."}), 404
 
-    # Verify ownership
     if g.user_id and conv["user_id"] != g.user_id:
         return jsonify({"error": "غير مصرح."}), 403
     if g.guest_id and conv["guest_id"] != g.guest_id:
@@ -95,7 +91,6 @@ def update_title(conv_id: str):
     if not conv:
         return jsonify({"error": "المحادثة غير موجودة."}), 404
 
-    # Verify ownership
     if g.user_id and conv["user_id"] != g.user_id:
         return jsonify({"error": "غير مصرح."}), 403
     if g.guest_id and conv["guest_id"] != g.guest_id:
@@ -119,7 +114,6 @@ def delete_conv(conv_id: str):
     if not conv:
         return jsonify({"error": "المحادثة غير موجودة."}), 404
 
-    # Verify ownership
     if g.user_id and conv["user_id"] != g.user_id:
         return jsonify({"error": "غير مصرح."}), 403
     if g.guest_id and conv["guest_id"] != g.guest_id:
@@ -133,7 +127,7 @@ def delete_conv(conv_id: str):
 @rate_limit(max_per_minute=20)
 @require_auth_or_guest
 def search_convs():
-    """Search conversations by title or message content."""
+    """Search conversations by title or content."""
     data = request.get_json(force=True)
     query = data.get("query", "").strip()
 

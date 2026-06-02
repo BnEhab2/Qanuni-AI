@@ -1,27 +1,13 @@
 """
-EgyLegalAi — Core Hybrid Retrieval Module
-======================================
-Combines semantic embeddings (ChromaDB) with BM25 keyword matching
-using Reciprocal Rank Fusion (RRF) for robust legal document retrieval.
-
-Features:
-    - Semantic search via ChromaDB embeddings
-    - BM25 keyword search via rank_bm25
-    - Reciprocal Rank Fusion (RRF) for score combination
-    - Embedding LRU cache for repeated queries
-    - Async-ready architecture
-
-CPU Optimization:
-    - LRU cache on embedding calls
-    - Single model load at startup
-    - Batched operations where possible
+Qanuni.AI — Hybrid Retrieval
+Combines semantic search (ChromaDB) with BM25 keyword matching
+using Reciprocal Rank Fusion (RRF).
 """
 
 import re
 import hashlib
 import threading
 import time
-from functools import lru_cache
 from typing import Optional
 
 import chromadb
@@ -41,32 +27,16 @@ from config import (
 )
 
 
-# ── Arabic-aware tokenizer ────────────────────────────────────────────
 def _tokenize_arabic(text: str) -> list[str]:
-    """
-    Simple Arabic-aware tokenizer:
-    - Removes diacritics (tashkeel)
-    - Splits on whitespace and punctuation
-    - Lowercases for consistency
-    - Filters very short tokens
-    """
-    # Remove Arabic diacritics
+    """Simple Arabic tokenizer: removes diacritics, splits, lowercases."""
     diacritics = re.compile(r'[\u0617-\u061A\u064B-\u0652\u0670]')
     text = diacritics.sub('', text)
-
-    # Split on non-alphanumeric characters (keeps Arabic letters)
     tokens = re.split(r'[^\w\u0600-\u06FF]+', text.lower())
-
-    # Filter empty and very short tokens
     return [t for t in tokens if len(t) > 1]
 
 
 class HybridRetriever:
-    """
-    Hybrid retrieval engine combining ChromaDB semantic search with BM25.
-
-    Uses Reciprocal Rank Fusion (RRF) to combine results from both methods.
-    """
+    """Hybrid retrieval: ChromaDB semantic + BM25, fused with RRF."""
 
     def __init__(
         self,
@@ -74,41 +44,33 @@ class HybridRetriever:
         chroma_client: Optional[chromadb.ClientAPI] = None,
         collection: Optional[chromadb.Collection] = None,
     ):
-        """
-        Initialize the hybrid retriever.
-
-        Args:
-            embed_model:   Pre-loaded SentenceTransformer (shared with app.py).
-            chroma_client: Pre-loaded ChromaDB client (shared with app.py).
-            collection:    Pre-loaded ChromaDB collection (shared with app.py).
-        """
         self._embed_model = embed_model
         self._chroma_client = chroma_client
         self._collection = collection
 
-        # BM25 index state
+        # BM25 state
         self._bm25 = None
         self._bm25_docs: list[dict] = []
         self._bm25_lock = threading.Lock()
         self._bm25_built = False
 
     def _ensure_embed_model(self):
-        """Lazy-load embedding model if not provided."""
+        """Load embedding model if not provided."""
         if self._embed_model is not None:
             return
 
         import torch
         torch.set_num_threads(TORCH_NUM_THREADS)
 
-        print(f"[HybridRetrieval] Loading embedding model: {EMBEDDING_MODEL}")
+        print(f"[Retrieval] Loading embedding model: {EMBEDDING_MODEL}")
         self._embed_model = SentenceTransformer(EMBEDDING_MODEL)
 
     def _ensure_chroma(self):
-        """Lazy-load ChromaDB if not provided."""
+        """Connect to ChromaDB if not provided."""
         if self._collection is not None:
             return
 
-        print(f"[HybridRetrieval] Connecting to ChromaDB at: {CHROMA_DB_PATH}")
+        print(f"[Retrieval] Connecting to ChromaDB at: {CHROMA_DB_PATH}")
         self._chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
         self._collection = self._chroma_client.get_collection(name=CHROMA_COLLECTION)
 
@@ -124,36 +86,35 @@ class HybridRetriever:
             self._ensure_chroma()
             total = self._collection.count()
 
-            # Disk Cache Setup
+            # Try loading from disk cache first
             from pathlib import Path
             import pickle
             cache_path = Path(CHROMA_DB_PATH) / "bm25_cache.pkl"
 
             if cache_path.exists():
-                print(f"[HybridRetrieval] Found BM25 disk cache at {cache_path}. Loading...")
+                print(f"[Retrieval] Loading BM25 cache from disk...")
                 try:
                     t0 = time.time()
                     with open(cache_path, "rb") as f:
-                        cache_data = pickle.load(f)
+                        cache = pickle.load(f)
 
-                    if cache_data.get("total_docs") == total:
-                        self._bm25 = cache_data["bm25"]
-                        self._bm25_docs = cache_data["bm25_docs"]
+                    if cache.get("total_docs") == total:
+                        self._bm25 = cache["bm25"]
+                        self._bm25_docs = cache["bm25_docs"]
                         self._bm25_built = True
-                        t1 = time.time()
-                        print(f"[HybridRetrieval] BM25 index loaded successfully from disk in {t1 - t0:.2f}s (verified {total} docs)")
+                        print(f"[Retrieval] BM25 loaded from cache in {time.time() - t0:.2f}s ({total} docs)")
                         return
                     else:
-                        print(f"[HybridRetrieval] BM25 cache document count mismatch ({cache_data.get('total_docs')} vs {total}). Rebuilding...")
+                        print(f"[Retrieval] BM25 cache stale, rebuilding...")
                 except Exception as e:
-                    print(f"[HybridRetrieval] Error loading BM25 cache: {e}. Rebuilding...")
+                    print(f"[Retrieval] Cache load error: {e}, rebuilding...")
 
             from rank_bm25 import BM25Okapi
 
-            print("[HybridRetrieval] Building BM25 index from ChromaDB documents...")
+            print("[Retrieval] Building BM25 index...")
             t0 = time.time()
 
-            # Fetch all documents from ChromaDB for BM25 indexing
+            # Fetch all documents from ChromaDB
             batch_size = 5000
             all_docs = []
             all_metas = []
@@ -170,54 +131,45 @@ class HybridRetriever:
                     all_metas.extend(result["metadatas"])
                     all_ids.extend(result["ids"])
 
-            # Store document info for BM25 result lookup
             self._bm25_docs = []
-            tokenized_corpus = []
+            tokenized = []
 
             for doc_id, doc_text, meta in zip(all_ids, all_docs, all_metas):
                 tokens = _tokenize_arabic(doc_text)
-                tokenized_corpus.append(tokens)
+                tokenized.append(tokens)
                 self._bm25_docs.append({
-                    "id":         doc_id,
-                    "text":       doc_text,
-                    "law_name":   meta.get("title", ""),
+                    "id":       doc_id,
+                    "text":     doc_text,
+                    "law_name": meta.get("title", ""),
                     "categories": meta.get("category", ""),
-                    "source":     meta.get("source", ""),
-                    "type":       meta.get("type", ""),
-                    "summary":    meta.get("summary", ""),
-                    "keywords":   meta.get("keywords", ""),
+                    "source":   meta.get("source", ""),
+                    "type":     meta.get("type", ""),
+                    "summary":  meta.get("summary", ""),
+                    "keywords": meta.get("keywords", ""),
                 })
 
-            self._bm25 = BM25Okapi(tokenized_corpus)
+            self._bm25 = BM25Okapi(tokenized)
             self._bm25_built = True
 
-            t1 = time.time()
-            print(f"[HybridRetrieval] BM25 index built: {len(all_docs)} documents in {t1 - t0:.2f}s")
+            print(f"[Retrieval] BM25 built: {len(all_docs)} docs in {time.time() - t0:.2f}s")
 
-            # Save built index to disk cache
+            # Save to disk cache
             try:
-                print("[HybridRetrieval] Caching BM25 index to disk...")
-                t_save_0 = time.time()
-                cache_data = {
-                    "total_docs": total,
-                    "bm25": self._bm25,
-                    "bm25_docs": self._bm25_docs
-                }
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(cache_path, "wb") as f:
-                    pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-                t_save_1 = time.time()
-                print(f"[HybridRetrieval] BM25 disk cache saved in {t_save_1 - t_save_0:.2f}s")
+                    pickle.dump({
+                        "total_docs": total,
+                        "bm25": self._bm25,
+                        "bm25_docs": self._bm25_docs,
+                    }, f, protocol=pickle.HIGHEST_PROTOCOL)
+                print("[Retrieval] BM25 cache saved to disk")
             except Exception as e:
-                print(f"[HybridRetrieval] Error saving BM25 cache: {e}")
+                print(f"[Retrieval] Failed to save cache: {e}")
 
     def _encode_query(self, query: str) -> list[float]:
-        """Encode query with embedding model (uses cache for repeated queries)."""
+        """Encode query text into embedding vector."""
         self._ensure_embed_model()
-        embedding = self._embed_model.encode(
-            query,
-            normalize_embeddings=True,
-        )
+        embedding = self._embed_model.encode(query, normalize_embeddings=True)
         return embedding.tolist()
 
     def semantic_search(
@@ -228,15 +180,11 @@ class HybridRetriever:
         type_filter: Optional[str] = None,
         category_filter: Optional[str] = None,
     ) -> list[dict]:
-        """
-        Semantic search over ChromaDB using embedding similarity.
-        Same as the original search_laws() but integrated into the retriever.
-        """
+        """Search ChromaDB using embedding similarity."""
         self._ensure_chroma()
         query_embedding = self._encode_query(query)
 
-        # Build optional where clause
-        where_clause = None
+        # Build where clause from filters
         conditions = []
         if source_filter:
             conditions.append({"source": {"$eq": source_filter}})
@@ -245,15 +193,16 @@ class HybridRetriever:
         if category_filter:
             conditions.append({"category": {"$eq": category_filter}})
 
+        where = None
         if len(conditions) == 1:
-            where_clause = conditions[0]
+            where = conditions[0]
         elif len(conditions) > 1:
-            where_clause = {"$and": conditions}
+            where = {"$and": conditions}
 
         results = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
-            where=where_clause if where_clause else None,
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
 
@@ -279,16 +228,7 @@ class HybridRetriever:
         return formatted
 
     def bm25_search(self, query: str, top_k: int = BM25_TOP_K) -> list[dict]:
-        """
-        BM25 keyword search over the document corpus.
-
-        Args:
-            query:  The search query.
-            top_k:  Number of top results to return.
-
-        Returns:
-            List of document dicts with BM25 scores.
-        """
+        """BM25 keyword search over the corpus."""
         self._build_bm25_index()
 
         query_tokens = _tokenize_arabic(query)
@@ -297,7 +237,6 @@ class HybridRetriever:
 
         scores = self._bm25.get_scores(query_tokens)
 
-        # Get top_k indices by score
         top_indices = sorted(
             range(len(scores)),
             key=lambda i: scores[i],
@@ -324,37 +263,16 @@ class HybridRetriever:
         type_filter: Optional[str] = None,
         category_filter: Optional[str] = None,
     ) -> list[dict]:
-        """
-        Hybrid search combining semantic and BM25 using Reciprocal Rank Fusion.
-
-        RRF score = Σ (weight / (k + rank))  where k=60 is a standard constant.
-
-        Args:
-            query:           The search query.
-            top_k:           Total number of candidates to return.
-            semantic_weight: Weight for semantic search scores.
-            bm25_weight:     Weight for BM25 search scores.
-            source_filter:   Optional metadata filter.
-            type_filter:     Optional metadata filter.
-            category_filter: Optional metadata filter.
-
-        Returns:
-            Fused and de-duplicated results sorted by combined RRF score.
-        """
-        # Run both searches
+        """Combine semantic + BM25 results using Reciprocal Rank Fusion."""
         semantic_results = self.semantic_search(
-            query,
-            top_k=top_k,
+            query, top_k=top_k,
             source_filter=source_filter,
             type_filter=type_filter,
             category_filter=category_filter,
         )
         bm25_results = self.bm25_search(query, top_k=top_k)
 
-        # Reciprocal Rank Fusion
-        RRF_K = 60  # Standard RRF constant
-
-        # Build score map keyed by text hash (for deduplication)
+        RRF_K = 60
         score_map: dict[str, dict] = {}
 
         for rank, doc in enumerate(semantic_results):
@@ -381,7 +299,6 @@ class HybridRetriever:
                 score_map[text_hash]["rrf_score"] += rrf_score
                 score_map[text_hash]["retrieval_method"] = "hybrid"
 
-        # Sort by combined RRF score
         fused = sorted(
             score_map.values(),
             key=lambda d: d.get("rrf_score", 0),
@@ -391,9 +308,9 @@ class HybridRetriever:
         return fused[:top_k]
 
 
-# ── Module-level singleton ─────────────────────────────────────────────
-_retriever_instance: Optional[HybridRetriever] = None
-_retriever_lock = threading.Lock()
+# Singleton
+_retriever: Optional[HybridRetriever] = None
+_lock = threading.Lock()
 
 
 def get_hybrid_retriever(
@@ -401,14 +318,14 @@ def get_hybrid_retriever(
     chroma_client: Optional[chromadb.ClientAPI] = None,
     collection: Optional[chromadb.Collection] = None,
 ) -> HybridRetriever:
-    """Get or create the module-level hybrid retriever singleton."""
-    global _retriever_instance
-    if _retriever_instance is None:
-        with _retriever_lock:
-            if _retriever_instance is None:
-                _retriever_instance = HybridRetriever(
+    """Get or create the hybrid retriever singleton."""
+    global _retriever
+    if _retriever is None:
+        with _lock:
+            if _retriever is None:
+                _retriever = HybridRetriever(
                     embed_model=embed_model,
                     chroma_client=chroma_client,
                     collection=collection,
                 )
-    return _retriever_instance
+    return _retriever
