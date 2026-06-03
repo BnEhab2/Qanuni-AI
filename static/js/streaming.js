@@ -11,7 +11,7 @@ const Streaming = {
      * Supports cancellation via AbortController.
      */
     async stream(url, payload, headers, callbacks) {
-        const { onSources, onToken, onDone, onError, onClassification } = callbacks;
+        const { onSources, onToken, onDone, onError, onClassification, onConfidence, onContradictions, onRisks, onProsecution, onDefense, onJudgeDecision } = callbacks;
         
         try {
             const response = await fetch(url, {
@@ -58,7 +58,7 @@ const Streaming = {
                         const jsonStr = eventText.slice(5).trim();
                         try {
                             const eventData = JSON.parse(jsonStr);
-                            this.processEvent(eventData, { onSources, onToken, onDone, onClassification });
+                            this.processEvent(eventData, { onSources, onToken, onDone, onClassification, onConfidence, onContradictions, onRisks, onProsecution, onDefense, onJudgeDecision, onError });
                         } catch (e) {
                             console.warn("[Streaming] Failed to parse JSON event:", e, jsonStr);
                         }
@@ -82,6 +82,24 @@ const Streaming = {
                 break;
             case "classification":
                 if (callbacks.onClassification) callbacks.onClassification(event.data);
+                break;
+            case "confidence":
+                if (callbacks.onConfidence) callbacks.onConfidence(event.data);
+                break;
+            case "contradictions":
+                if (callbacks.onContradictions) callbacks.onContradictions(event.data);
+                break;
+            case "risks":
+                if (callbacks.onRisks) callbacks.onRisks(event.data);
+                break;
+            case "prosecution":
+                if (callbacks.onProsecution) callbacks.onProsecution(event.data);
+                break;
+            case "defense":
+                if (callbacks.onDefense) callbacks.onDefense(event.data);
+                break;
+            case "judge_decision":
+                if (callbacks.onJudgeDecision) callbacks.onJudgeDecision(event.data);
                 break;
             case "token":
                 if (callbacks.onToken) callbacks.onToken(event.data);

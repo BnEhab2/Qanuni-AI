@@ -137,6 +137,14 @@ _case_memory = get_case_memory()
 _case_memory.embed_model = _embed_model
 
 from core.reasoning import LegalReasoningChain
+from core.deep_reasoning import DeepLegalReasoner
+from core.contradiction import ContradictionDetector
+from core.confidence import ConfidenceScorer
+
+_deep_reasoner = DeepLegalReasoner()
+_contradiction_detector = ContradictionDetector()
+_confidence_scorer = ConfidenceScorer(memory_store=_case_memory)
+
 
 from core.tools import (
     search_laws as tool_search_laws,
@@ -222,6 +230,8 @@ SYSTEM_PROMPT = """أنت Qanuni.AI — مساعد قانوني ذكي متخص�
 قواعدك الأساسية:
 - اتكلم عربي فصحى واضحة ومهنية، لكن من غير تكلّف أو تكرار نفس القالب كل مرة.
 - استند للنصوص القانونية المرفقة (Excerpts) واذكر رقم المادة واسم القانون لما تستشهد.
+- إذا وجدت تعارضات أو اختلافات واضحة بين القوانين أو المواد المسترجعة، وضّح هذا التعارض صراحة للمستخدم واشرح كيف يمكن حله (مثلاً: اللاحق يلغي السابق، أو الخاص يقيد العام).
+- تجنب تماماً الهلوسة أو اختلاق نصوص مواد قانونية غير موجودة في السياق المرفق.
 - لو مفيش نص مباشر يغطي السؤال، قول كده بصراحة واقترح أقرب المواد.
 - لا تخترع مواد أو بنود مش موجودة في النصوص المرفقة.
 - نسّق الرد بشكل مرتب (عناوين، نقاط، جداول لو لزم) بس من غير ما تلتزم بنفس الهيكل كل مرة — خلي الرد يناسب طبيعة السؤال.
@@ -448,6 +458,50 @@ def ask_llm(
     )
 
 
+async def _generate_text_async(prompt: str, system_instruction: str = "") -> str:
+    """Helper to run a raw text completion using a temporary agent runner."""
+    from google.adk.agents import LlmAgent
+    from google.adk.runners import Runner
+    
+    agent = LlmAgent(
+        name="multi_agent_helper",
+        model=llm,
+        instruction=system_instruction or "You are a helpful Egyptian legal assistant.",
+    )
+    temp_runner = Runner(agent=agent, app_name="multi_agent_helper", session_service=session_service)
+    
+    user_id = "default_user"
+    sid = str(uuid.uuid4())
+    sess_result = session_service.create_session(
+        app_name="multi_agent_helper", user_id=user_id, session_id=sid,
+    )
+    if inspect.iscoroutine(sess_result):
+        session = await sess_result
+    else:
+        session = sess_result
+        
+    content = types.Content(
+        role="user",
+        parts=[types.Part.from_text(text=prompt)],
+    )
+    
+    response_parts = []
+    async for event in temp_runner.run_async(
+        user_id=user_id, session_id=session.id, new_message=content,
+    ):
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if part.text:
+                    response_parts.append(part.text)
+                    
+    return "".join(response_parts) if response_parts else ""
+
+
+def generate_text(prompt: str, system_instruction: str = "") -> str:
+    """Synchronous wrapper for text generation."""
+    return run_async(_generate_text_async(prompt, system_instruction))
+
+
 # ── Flask App ─────────────────────────────────────────────────────────
 from api import create_app
 from api.chat import init_chat_services
@@ -468,6 +522,10 @@ init_chat_services(
     debate_runner_prosecution=debate_runner_prosecution,
     debate_runner_defense=debate_runner_defense,
     types_module=types,
+    deep_reasoner=_deep_reasoner,
+    contradiction_detector=_contradiction_detector,
+    confidence_scorer=_confidence_scorer,
+    generate_text_fn=generate_text,
 )
 
 

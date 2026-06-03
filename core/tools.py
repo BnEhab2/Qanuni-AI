@@ -210,3 +210,68 @@ def build_citation_block(results: list[dict]) -> str:
     header = "\n\n### المراجع القانونية المستخدمة:\n"
     body = "\n".join(f"- {c}" for c in citations)
     return header + body
+
+
+def extract_cross_references(text: str) -> list[str]:
+    """Helper to extract article references from text."""
+    patterns = [
+        r'(?:ال)?مادة\s+(?:رقم\s*)?(\d+(?:\s*مكرر)?)'
+    ]
+    refs = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            refs.append(match.group(1).strip())
+    return list(set(refs))
+
+
+def score_article_applicability(query_facts: dict, article_text: str) -> float:
+    """Helper to calculate article relevance to extracted facts."""
+    fact_keywords = set(query_facts.get("keywords", []) + query_facts.get("actions", []))
+    if not fact_keywords:
+        return 0.5
+    hits = sum(1 for kw in fact_keywords if kw in article_text)
+    return hits / len(fact_keywords)
+
+
+def build_risk_matrix(prosecution_laws: list[dict], defense_laws: list[dict], facts: dict) -> list[dict]:
+    """Helper to construct risk matrix from prosecution/defense laws and facts."""
+    risks = []
+    # Identify prosecution severity
+    for idx, law in enumerate(prosecution_laws):
+        text = law.get("text", "")
+        severity = "low"
+        if any(t in text for t in ["إعدام", "سجن مؤبد", "الأشغال الشاقة"]):
+            severity = "high"
+        elif any(t in text for t in ["سجن", "حبس"]):
+            severity = "medium"
+
+        probability = "low"
+        applicability = score_article_applicability(facts, text)
+        if applicability > 0.6:
+            probability = "high"
+        elif applicability > 0.3:
+            probability = "medium"
+
+        risk_matrix = {
+            ("high", "high"): "critical",
+            ("high", "medium"): "high",
+            ("high", "low"): "medium",
+            ("medium", "high"): "high",
+            ("medium", "medium"): "medium",
+            ("medium", "low"): "low",
+            ("low", "high"): "medium",
+            ("low", "medium"): "low",
+            ("low", "low"): "low",
+        }
+        risk_level = risk_matrix.get((severity, probability), "low")
+
+        risks.append({
+            "issue": f"خطر ادعاء #{idx+1}",
+            "severity": severity,
+            "probability": probability,
+            "risk_level": risk_level,
+            "related_law": law.get("law_name", "قانون العقوبات"),
+            "description": text[:150]
+        })
+    return risks
+

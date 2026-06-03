@@ -229,7 +229,17 @@ function renderMessagesFromServer(messages) {
         if (m.role === "user") {
             appendUserMsg(m.content, false);
         } else {
-            appendAiMsg(m.content, m.sources || [], false);
+            appendAiMsg(
+                m.content, 
+                m.sources || [], 
+                false, 
+                null, 
+                [], 
+                [], 
+                m.prosecution || null, 
+                m.defense || null, 
+                m.judge_decision || null
+            );
         }
     });
     scrollToBottom();
@@ -371,6 +381,32 @@ async function sendMessage() {
             },
             onClassification(category) {
                 console.log("[Pipeline] Classified:", category);
+            },
+            onConfidence(confidence) {
+                ensureAiBubble();
+                renderConfidence(aiContentWrapper, confidence);
+            },
+            onContradictions(contradictions) {
+                ensureAiBubble();
+                renderContradictions(aiContentWrapper, contradictions);
+            },
+            onRisks(risks) {
+                ensureAiBubble();
+                renderRisks(aiContentWrapper, risks);
+            },
+            onProsecution(prosecution) {
+                ensureAiBubble();
+                aiContentWrapper.prosecutionData = prosecution;
+                renderAdvocacy(aiContentWrapper, prosecution, aiContentWrapper.defenseData || null);
+            },
+            onDefense(defense) {
+                ensureAiBubble();
+                aiContentWrapper.defenseData = defense;
+                renderAdvocacy(aiContentWrapper, aiContentWrapper.prosecutionData || null, defense);
+            },
+            onJudgeDecision(judgeDecision) {
+                ensureAiBubble();
+                renderJudgeDecision(aiContentWrapper, judgeDecision);
             },
             onToken(token) {
                 removeThinking();
@@ -553,7 +589,7 @@ function appendUserMsg(text, save = true) {
     scrollToBottom();
 }
 
-function appendAiMsg(text, sources = [], save = true) {
+function appendAiMsg(text, sources = [], save = true, confidence = null, contradictions = [], risks = [], prosecution = null, defense = null, judgeDecision = null) {
     DOM.welcomeScreen.style.display = "none";
     DOM.debateSetup.classList.remove("visible");
 
@@ -571,6 +607,29 @@ function appendAiMsg(text, sources = [], save = true) {
     contentDiv.className = "msg-content";
     contentDiv.innerHTML = renderMarkdown(text);
     contentWrapper.appendChild(contentDiv);
+
+    // Render new elements if provided
+    if (confidence) {
+        renderConfidence(contentWrapper, confidence);
+    }
+    if (contradictions && contradictions.length > 0) {
+        renderContradictions(contentWrapper, contradictions);
+    }
+    if (risks && risks.length > 0) {
+        renderRisks(contentWrapper, risks);
+    }
+
+    // Render Prosecution and Defense if provided
+    if (prosecution || defense) {
+        contentWrapper.prosecutionData = prosecution;
+        contentWrapper.defenseData = defense;
+        renderAdvocacy(contentWrapper, prosecution, defense);
+    }
+
+    // Render Judge Decision if provided
+    if (judgeDecision && judgeDecision.verdict) {
+        renderJudgeDecision(contentWrapper, judgeDecision);
+    }
 
     // Citations
     if (sources && sources.length > 0) {
@@ -606,6 +665,124 @@ function appendAiMsg(text, sources = [], save = true) {
     DOM.chatMessages.appendChild(row);
     scrollToBottom();
 }
+
+function renderConfidence(wrapper, conf) {
+    if (!conf || conf.overall_confidence === undefined) return;
+    
+    let existing = wrapper.querySelector(".confidence-badge");
+    if (existing) existing.remove();
+    
+    const badge = document.createElement("div");
+    const pct = Math.round(conf.overall_confidence * 100);
+    let badgeClass = "conf-low";
+    let dot = "🔴";
+    
+    if (conf.confidence_label === "high") {
+        badgeClass = "conf-high";
+        dot = "🟢";
+    } else if (conf.confidence_label === "medium") {
+        badgeClass = "conf-medium";
+        dot = "🟡";
+    }
+    
+    badge.className = `confidence-badge ${badgeClass}`;
+    badge.innerHTML = `
+        <span class="conf-dot">${dot}</span>
+        <span class="conf-text">${escapeHtml(conf.confidence_label_ar)} (${pct}%)</span>
+    `;
+    
+    wrapper.insertBefore(badge, wrapper.firstChild);
+
+    // Render warnings if any
+    if (conf.warnings && conf.warnings.length > 0) {
+        let warnDiv = wrapper.querySelector(".confidence-warnings");
+        if (warnDiv) warnDiv.remove();
+        
+        warnDiv = document.createElement("div");
+        warnDiv.className = "confidence-warnings";
+        conf.warnings.forEach(w => {
+            const p = document.createElement("div");
+            p.className = "warning-item";
+            p.textContent = w;
+            warnDiv.appendChild(p);
+        });
+        wrapper.appendChild(warnDiv);
+    }
+}
+
+function renderContradictions(wrapper, contradictions) {
+    if (!contradictions || contradictions.length === 0) return;
+    
+    let existing = wrapper.querySelector(".contradictions-container");
+    if (existing) existing.remove();
+    
+    const container = document.createElement("div");
+    container.className = "contradictions-container";
+    container.innerHTML = '<div class="contradictions-label">⚠️ تعارضات قانونية محتملة</div>';
+    
+    contradictions.forEach(c => {
+        const card = document.createElement("div");
+        card.className = `contradiction-card severity-${c.severity}`;
+        card.innerHTML = `
+            <div class="contradiction-header">
+                <span class="contradiction-title">${escapeHtml(c.article_a_name)} ↔ ${escapeHtml(c.article_b_name)}</span>
+            </div>
+            <div class="contradiction-body">
+                <div class="contradiction-desc">${escapeHtml(c.description)}</div>
+                ${c.resolution_hint ? `<div class="contradiction-hint"><strong>الحل المقترح:</strong> ${escapeHtml(c.resolution_hint)}</div>` : ''}
+            </div>
+        `;
+        container.appendChild(card);
+    });
+    
+    const actions = wrapper.querySelector(".msg-actions");
+    if (actions) {
+        wrapper.insertBefore(container, actions);
+    } else {
+        wrapper.appendChild(container);
+    }
+}
+
+function renderRisks(wrapper, risks) {
+    if (!risks || risks.length === 0) return;
+    
+    let existing = wrapper.querySelector(".risks-container");
+    if (existing) existing.remove();
+    
+    const container = document.createElement("div");
+    container.className = "risks-container";
+    container.innerHTML = '<div class="risks-label">📊 تقييم المخاطر القانونية</div>';
+    
+    const grid = document.createElement("div");
+    grid.className = "risks-grid";
+    
+    risks.forEach(r => {
+        const card = document.createElement("div");
+        card.className = `risk-card risk-level-${r.risk_level}`;
+        card.innerHTML = `
+            <div class="risk-header">
+                <span class="risk-issue">${escapeHtml(r.issue)}</span>
+                <span class="risk-badge">${escapeHtml(r.risk_level.toUpperCase())}</span>
+            </div>
+            <div class="risk-body">
+                <div class="risk-detail"><strong>الشدة:</strong> ${escapeHtml(r.severity)} | <strong>الاحتمالية:</strong> ${escapeHtml(r.probability)}</div>
+                <div class="risk-desc">${escapeHtml(r.description)}</div>
+            </div>
+        `;
+        grid.appendChild(card);
+    });
+    
+    container.appendChild(grid);
+    
+    const actions = wrapper.querySelector(".msg-actions");
+    if (actions) {
+        wrapper.insertBefore(container, actions);
+    } else {
+        wrapper.appendChild(container);
+    }
+}
+
+
 
 function addActionsRow(wrapper, text) {
     const actionsRow = document.createElement("div");
@@ -870,4 +1047,123 @@ function renderMarkdown(text) {
     html = "<p>" + html + "</p>";
     html = html.replace(/<p>\s*<\/p>/g, "");
     return html;
+}
+
+function renderAdvocacy(wrapper, prosecution, defense) {
+    if (!prosecution && !defense) return;
+    
+    let container = wrapper.querySelector(".advocacy-container");
+    if (!container) {
+        container = document.createElement("div");
+        container.className = "advocacy-container";
+        const actions = wrapper.querySelector(".msg-actions");
+        if (actions) {
+            wrapper.insertBefore(container, actions);
+        } else {
+            wrapper.appendChild(container);
+        }
+    }
+    
+    // Render Prosecution Column
+    let prosDiv = container.querySelector(".prosecution-side");
+    if (prosecution) {
+        if (!prosDiv) {
+            prosDiv = document.createElement("div");
+            prosDiv.className = "advocacy-side prosecution-side";
+            container.appendChild(prosDiv);
+        }
+        const articlesHtml = (prosecution.supporting_articles || []).map(a => `<li>${escapeHtml(a)}</li>`).join("");
+        const riskLabel = prosecution.risk_view === "high" ? "عالي الخطورة" : prosecution.risk_view === "medium" ? "متوسط" : "منخفض";
+        prosDiv.innerHTML = `
+            <div class="side-header">
+                <span class="side-icon">⚖️</span>
+                <span class="side-title">مرافعة النيابة العامة (الادعاء)</span>
+            </div>
+            <div class="side-body">
+                <p class="side-arg"><strong>الاتهام الأساسي:</strong> ${escapeHtml(prosecution.argument || "")}</p>
+                <div class="side-reasoning"><strong>منطق النيابة:</strong> ${escapeHtml(prosecution.reasoning || "")}</div>
+                ${articlesHtml ? `<div class="side-articles"><strong>المواد المستند إليها:</strong><ul>${articlesHtml}</ul></div>` : ""}
+            </div>
+            <div class="side-footer">
+                <span class="side-confidence">قوة القضية: ${Math.round((prosecution.confidence || 0) * 100)}%</span>
+                <span class="side-risk risk-${prosecution.risk_view || 'medium'}">خطورة الجرم: ${riskLabel}</span>
+            </div>
+        `;
+    }
+    
+    // Render Defense Column
+    let defDiv = container.querySelector(".defense-side");
+    if (defense) {
+        if (!defDiv) {
+            defDiv = document.createElement("div");
+            defDiv.className = "advocacy-side defense-side";
+            container.appendChild(defDiv);
+        }
+        const articlesHtml = (defense.supporting_articles || []).map(a => `<li>${escapeHtml(a)}</li>`).join("");
+        const riskLabel = defense.risk_view === "high" ? "شديد" : defense.risk_view === "medium" ? "متوسط" : "مخفف";
+        defDiv.innerHTML = `
+            <div class="side-header">
+                <span class="side-icon">🛡️</span>
+                <span class="side-title">دفوع محامي الدفاع</span>
+            </div>
+            <div class="side-body">
+                <p class="side-arg"><strong>الحجة الأساسية:</strong> ${escapeHtml(defense.argument || "")}</p>
+                <div class="side-reasoning"><strong>منطق الدفاع:</strong> ${escapeHtml(defense.reasoning || "")}</div>
+                ${articlesHtml ? `<div class="side-articles"><strong>المواد المستند إليها:</strong><ul>${articlesHtml}</ul></div>` : ""}
+            </div>
+            <div class="side-footer">
+                <span class="side-confidence">ثقة الدفاع: ${Math.round((defense.confidence || 0) * 100)}%</span>
+                <span class="side-risk risk-${defense.risk_view || 'low'}">مستوى الخطر: ${riskLabel}</span>
+            </div>
+        `;
+    }
+}
+
+function renderJudgeDecision(wrapper, decision) {
+    if (!decision || !decision.verdict) return;
+    
+    let existing = wrapper.querySelector(".judge-decision-container");
+    if (existing) existing.remove();
+    
+    const container = document.createElement("div");
+    container.className = `judge-decision-container verdict-${decision.verdict}`;
+    
+    let verdictIcon = "⚖️";
+    if (decision.verdict === "guilty") {
+        verdictIcon = "🔨";
+    } else if (decision.verdict === "not_guilty") {
+        verdictIcon = "🕊️";
+    }
+    
+    const factorsHtml = (decision.key_factors || []).map(f => `<li>${escapeHtml(f)}</li>`).join("");
+    
+    container.innerHTML = `
+        <div class="judge-header">
+            <span class="judge-icon">${verdictIcon}</span>
+            <div class="judge-title-box">
+                <span class="judge-title">حكم منصة القضاء</span>
+                <span class="judge-verdict-badge verdict-${decision.verdict}">الحكم: ${escapeHtml(decision.verdict_ar || "")}</span>
+            </div>
+            <span class="judge-confidence">ثقة المحكمة: ${Math.round((decision.confidence || 0) * 100)}%</span>
+        </div>
+        <div class="judge-body">
+            <div class="judge-reasoning">
+                <strong>حيثيات الحكم وأسبابه:</strong>
+                <p>${escapeHtml(decision.reasoning || "")}</p>
+            </div>
+            ${factorsHtml ? `
+            <div class="judge-factors">
+                <strong>العوامل الحاسمة في الحكم:</strong>
+                <ul>${factorsHtml}</ul>
+            </div>
+            ` : ""}
+        </div>
+    `;
+    
+    const actions = wrapper.querySelector(".msg-actions");
+    if (actions) {
+        wrapper.insertBefore(container, actions);
+    } else {
+        wrapper.appendChild(container);
+    }
 }

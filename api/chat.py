@@ -47,6 +47,10 @@ def init_chat_services(
     debate_runner_prosecution,
     debate_runner_defense,
     types_module,
+    deep_reasoner,
+    contradiction_detector,
+    confidence_scorer,
+    generate_text_fn=None,
 ):
     """Inject initialized services from app.py."""
     _services["search_laws"] = search_laws_fn
@@ -62,6 +66,10 @@ def init_chat_services(
     _services["debate_runner_prosecution"] = debate_runner_prosecution
     _services["debate_runner_defense"] = debate_runner_defense
     _services["types"] = types_module
+    _services["deep_reasoner"] = deep_reasoner
+    _services["contradiction_detector"] = contradiction_detector
+    _services["confidence_scorer"] = confidence_scorer
+    _services["generate_text"] = generate_text_fn
 
 
 def _auto_title(text: str) -> str:
@@ -130,19 +138,17 @@ def chat():
     # Step 1: Conversation context
     conversation_context = conversation_memory.get_context(session_id)
 
-    # Step 2: Reasoning chain (pre-analysis)
-    reasoning_chain = LegalReasoningChain()
+    # Step 2 & 3 & 4: Deep reasoning / Retrieval / Contradiction / Confidence
     reasoning_context = ""
     detected_category = "other"
+    confidence_data = {}
+    contradictions_data = []
+    risks_data = []
+    prosecution_data = {}
+    defense_data = {}
+    judge_decision_data = {}
 
-    try:
-        facts = reasoning_chain.identify_facts(user_message)
-        classification = reasoning_chain.classify_case(facts)
-        detected_category = classification.get("primary_category", "other")
-    except Exception as e:
-        print(f"[!] Reasoning pre-analysis error: {e}")
-
-    # Step 3: Retrieval
+    # Search laws (Retrieval)
     results = search_laws(
         user_message,
         source_filter=source_filter,
@@ -150,13 +156,61 @@ def chat():
         category_filter=category_filter,
     )
 
-    # Step 4: Full reasoning chain
-    try:
-        chain_result = reasoning_chain.run_full_chain(user_message, results)
-        reasoning_context = chain_result.get("reasoning_context", "")
-        detected_category = chain_result.get("primary_category", detected_category)
-    except Exception as e:
-        print(f"[!] Reasoning chain error: {e}")
+    deep_reasoner = _services.get("deep_reasoner")
+    contradiction_detector = _services.get("contradiction_detector")
+    confidence_scorer = _services.get("confidence_scorer")
+
+    if deep_reasoner and contradiction_detector and confidence_scorer:
+        try:
+            trace = deep_reasoner.run(
+                user_message,
+                results,
+                contradiction_detector,
+                generate_fn=_services.get("generate_text")
+            )
+            reasoning_context = trace.reasoning_context
+            detected_category = trace.primary_category
+            
+            prosecution_data = trace.prosecution
+            defense_data = trace.defense
+            judge_decision_data = trace.judge_decision
+
+            # Compute confidence score
+            confidence_data = confidence_scorer.score(
+                user_message,
+                trace.facts,
+                {"primary_category": trace.primary_category, "classification_confidence": trace.overall_confidence},
+                results,
+                trace.contradictions
+            )
+            contradictions_data = trace.contradictions
+            risks_data = [
+                {
+                    "issue": r["issue"] if isinstance(r, dict) else r.issue,
+                    "severity": r["severity"] if isinstance(r, dict) else r.severity,
+                    "probability": r["probability"] if isinstance(r, dict) else r.probability,
+                    "risk_level": r["risk_level"] if isinstance(r, dict) else r.risk_level,
+                    "related_law": r.get("related_law", "") if isinstance(r, dict) else getattr(r, "related_law", ""),
+                    "description": r["description"] if isinstance(r, dict) else r.description
+                } for r in trace.risk_assessment
+            ]
+        except Exception as e:
+            print(f"[!] Deep reasoning chain error: {e}. Falling back to old chain.")
+            reasoning_chain = LegalReasoningChain()
+            try:
+                chain_result = reasoning_chain.run_full_chain(user_message, results)
+                reasoning_context = chain_result.get("reasoning_context", "")
+                detected_category = chain_result.get("primary_category", detected_category)
+            except Exception as e2:
+                print(f"[!] Reasoning fallback chain error: {e2}")
+    else:
+        reasoning_chain = LegalReasoningChain()
+        try:
+            chain_result = reasoning_chain.run_full_chain(user_message, results)
+            reasoning_context = chain_result.get("reasoning_context", "")
+            detected_category = chain_result.get("primary_category", detected_category)
+        except Exception as e:
+            print(f"[!] Reasoning chain error: {e}")
 
     # Step 5: Citations
     citation_block = build_citation_block(results)
@@ -216,7 +270,15 @@ def chat():
                 "retrieval_method": r.get("retrieval_method", ""),
             })
 
-    add_message(conversation_id, "assistant", answer, sources)
+    add_message(
+        conversation_id,
+        "assistant",
+        answer,
+        sources,
+        prosecution=prosecution_data,
+        defense=defense_data,
+        judge_decision=judge_decision_data,
+    )
     new_remaining = increment_guest_count()
 
     conv = get_conversation(conversation_id)
@@ -230,6 +292,12 @@ def chat():
         "session_id": session_id,
         "conversation_id": conversation_id,
         "remaining_messages": new_remaining,
+        "confidence": confidence_data,
+        "contradictions": contradictions_data,
+        "risk_assessment": risks_data,
+        "prosecution": prosecution_data,
+        "defense": defense_data,
+        "judge_decision": judge_decision_data,
     })
 
 
@@ -284,16 +352,9 @@ def chat_stream():
         try:
             conversation_context = conversation_memory.get_context(session_id)
 
-            reasoning_chain = LegalReasoningChain()
-            reasoning_context = ""
-            detected_category = "other"
-
-            try:
-                facts = reasoning_chain.identify_facts(user_message)
-                classification = reasoning_chain.classify_case(facts)
-                detected_category = classification.get("primary_category", "other")
-            except Exception:
-                pass
+            prosecution_data = {}
+            defense_data = {}
+            judge_decision_data = {}
 
             results = search_laws(
                 user_message,
@@ -302,12 +363,61 @@ def chat_stream():
                 category_filter=category_filter,
             )
 
-            try:
-                chain_result = reasoning_chain.run_full_chain(user_message, results)
-                reasoning_context = chain_result.get("reasoning_context", "")
-                detected_category = chain_result.get("primary_category", detected_category)
-            except Exception:
-                pass
+            deep_reasoner = _services.get("deep_reasoner")
+            contradiction_detector = _services.get("contradiction_detector")
+            confidence_scorer = _services.get("confidence_scorer")
+
+            if deep_reasoner and contradiction_detector and confidence_scorer:
+                try:
+                    trace = deep_reasoner.run(
+                        user_message,
+                        results,
+                        contradiction_detector,
+                        generate_fn=_services.get("generate_text")
+                    )
+                    reasoning_context = trace.reasoning_context
+                    detected_category = trace.primary_category
+                    
+                    prosecution_data = trace.prosecution
+                    defense_data = trace.defense
+                    judge_decision_data = trace.judge_decision
+
+                    # Compute confidence score
+                    confidence_data = confidence_scorer.score(
+                        user_message,
+                        trace.facts,
+                        {"primary_category": trace.primary_category, "classification_confidence": trace.overall_confidence},
+                        results,
+                        trace.contradictions
+                    )
+                    contradictions_data = trace.contradictions
+                    risks_data = [
+                        {
+                            "issue": r["issue"] if isinstance(r, dict) else r.issue,
+                            "severity": r["severity"] if isinstance(r, dict) else r.severity,
+                            "probability": r["probability"] if isinstance(r, dict) else r.probability,
+                            "risk_level": r["risk_level"] if isinstance(r, dict) else r.risk_level,
+                            "related_law": r.get("related_law", "") if isinstance(r, dict) else getattr(r, "related_law", ""),
+                            "description": r["description"] if isinstance(r, dict) else r.description
+                        } for r in trace.risk_assessment
+                    ]
+                except Exception as e:
+                    print(f"[!] Deep reasoning chain error: {e}. Falling back to old chain.")
+                    reasoning_chain = LegalReasoningChain()
+                    try:
+                        chain_result = reasoning_chain.run_full_chain(user_message, results)
+                        reasoning_context = chain_result.get("reasoning_context", "")
+                        detected_category = chain_result.get("primary_category", detected_category)
+                    except Exception as e2:
+                        print(f"[!] Reasoning fallback chain error: {e2}")
+            else:
+                reasoning_chain = LegalReasoningChain()
+                try:
+                    chain_result = reasoning_chain.run_full_chain(user_message, results)
+                    reasoning_context = chain_result.get("reasoning_context", "")
+                    detected_category = chain_result.get("primary_category", detected_category)
+                except Exception as e:
+                    print(f"[!] Reasoning chain error: {e}")
 
             citation_block = build_citation_block(results)
 
@@ -329,6 +439,12 @@ def chat_stream():
 
             yield f"data: {json.dumps({'type': 'sources', 'data': sources}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'classification', 'data': detected_category})}\n\n"
+            yield f"data: {json.dumps({'type': 'confidence', 'data': confidence_data}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'contradictions', 'data': contradictions_data}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'risks', 'data': risks_data}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'prosecution', 'data': prosecution_data}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'defense', 'data': defense_data}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'judge_decision', 'data': judge_decision_data}, ensure_ascii=False)}\n\n"
 
             # Build LLM prompt
             context_parts = []
@@ -410,7 +526,15 @@ def chat_stream():
 
             conversation_memory.add_turn(session_id, "user", user_message)
             conversation_memory.add_turn(session_id, "assistant", full_response)
-            add_message(conversation_id, "assistant", full_response, sources)
+            add_message(
+                conversation_id,
+                "assistant",
+                full_response,
+                sources,
+                prosecution=prosecution_data,
+                defense=defense_data,
+                judge_decision=judge_decision_data,
+            )
 
             try:
                 case_memory.save_case_memory(

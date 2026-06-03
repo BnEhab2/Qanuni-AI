@@ -86,6 +86,15 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
                 CREATE INDEX IF NOT EXISTS idx_msg_created ON messages(created_at);
             """)
+            
+            # Add columns for multi-agent support if they do not exist
+            for col in ["prosecution", "defense", "judge_decision"]:
+                try:
+                    conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT DEFAULT NULL")
+                except sqlite3.OperationalError:
+                    # Column already exists
+                    pass
+                    
             conn.commit()
             _initialized = True
             print("[DB] Database initialized")
@@ -353,18 +362,24 @@ def add_message(
     role: str,
     content: str,
     sources: list[dict] | None = None,
+    prosecution: dict | None = None,
+    defense: dict | None = None,
+    judge_decision: dict | None = None,
 ) -> int:
     """Add a message to a conversation. Returns message ID."""
     conn = get_conn()
     try:
         cursor = conn.execute(
-            """INSERT INTO messages (conversation_id, role, content, sources, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO messages (conversation_id, role, content, sources, prosecution, defense, judge_decision, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 conversation_id,
                 role,
                 content,
                 json.dumps(sources or [], ensure_ascii=False),
+                json.dumps(prosecution, ensure_ascii=False) if prosecution else None,
+                json.dumps(defense, ensure_ascii=False) if defense else None,
+                json.dumps(judge_decision, ensure_ascii=False) if judge_decision else None,
                 time.time(),
             ),
         )
@@ -383,7 +398,7 @@ def get_messages(conversation_id: str, limit: int = 200) -> list[dict]:
     conn = get_conn()
     try:
         rows = conn.execute(
-            """SELECT id, role, content, sources, created_at
+            """SELECT id, role, content, sources, prosecution, defense, judge_decision, created_at
                FROM messages WHERE conversation_id = ?
                ORDER BY created_at ASC LIMIT ?""",
             (conversation_id, limit),
@@ -395,6 +410,15 @@ def get_messages(conversation_id: str, limit: int = 200) -> list[dict]:
                 msg["sources"] = json.loads(msg["sources"])
             except (json.JSONDecodeError, TypeError):
                 msg["sources"] = []
+            
+            for key in ["prosecution", "defense", "judge_decision"]:
+                if msg.get(key):
+                    try:
+                        msg[key] = json.loads(msg[key])
+                    except (json.JSONDecodeError, TypeError):
+                        msg[key] = {}
+                else:
+                    msg[key] = {}
             result.append(msg)
         return result
     finally:
