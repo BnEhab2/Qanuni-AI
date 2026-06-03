@@ -19,14 +19,18 @@ function safeDecodeURI(str) {
     if (!str) return "";
     try {
         // Fix missing percent signs in sequences like 'D8%AA' or 'D9%88' at word boundaries
-        let normalized = str.replace(/\b([0-9A-Fa-f]{2})%([0-9A-Fa-f]{2})/g, "%$1%$2");
+        let normalized = str.replace(/(?<!%)\b([0-9A-Fa-f]{2})%([0-9A-Fa-f]{2})/g, "%$1%$2");
         
-        // Remove spaces and hyphens between percent/hex pairs if they are part of a continuous encoding
-        normalized = normalized.replace(/(%[0-9A-Fa-f]{2})\s*-\s*(%[0-9A-Fa-f]{2})/g, "$1$2");
-        normalized = normalized.replace(/(%[0-9A-Fa-f]{2})\s+(%[0-9A-Fa-f]{2})/g, "$1$2");
-        
-        // Handle spaces inside a single code like '% D 8' or '% A 7'
-        normalized = normalized.replace(/%\s*([0-9A-Fa-f])\s*([0-9A-Fa-f])/g, "%$1$2");
+        let prev;
+        do {
+            prev = normalized;
+            // Remove spaces and hyphens between percent/hex pairs if they are part of a continuous encoding
+            normalized = normalized.replace(/(%[0-9A-Fa-f]{2})\s*-\s*(%[0-9A-Fa-f]{2})/g, "$1$2");
+            normalized = normalized.replace(/(%[0-9A-Fa-f]{2})\s+(%[0-9A-Fa-f]{2})/g, "$1$2");
+            
+            // Handle spaces inside a single code like '% D 8' or '% A 7'
+            normalized = normalized.replace(/%\s*([0-9A-Fa-f])\s*([0-9A-Fa-f])/g, "%$1$2");
+        } while (normalized !== prev);
 
         // Decode contiguous percent-encoded sequences
         return normalized.replace(/(%[0-9A-Fa-f]{2})+/g, (match) => {
@@ -59,6 +63,37 @@ function safeDecodeURI(str) {
         // Fallback on total failure
     }
     return str;
+}
+
+function cleanTextGarbage(text) {
+    if (!text) return "";
+    
+    let cleaned = text;
+    
+    // 1. Remove URLs (even with spaces like 'h t t p : / /')
+    cleaned = cleaned.replace(/https?:\/\/\S+/gi, "");
+    cleaned = cleaned.replace(/h\s*t\s*t\s*p\s*s?:\/\/\S+/gi, "");
+    cleaned = cleaned.replace(/www\.\S+/gi, "");
+    
+    // 2. Remove file names ending in .html or .pdf or similar
+    cleaned = cleaned.replace(/\S+\.(html|pdf|txt|doc|docx|aspx|php)\S*/gi, "");
+    
+    // 3. Remove words containing percent sign (garbage encodings), preserving valid percentage values (like 50% or %50 or ٥٠% or %٥٠)
+    cleaned = cleaned.replace(/\S*%+\S*/g, (match) => {
+        if (/^\d+%$/g.test(match) || /^%\d+$/g.test(match) || /^[٠-٩]+%$/g.test(match) || /^%[٠-٩]+$/g.test(match)) {
+            return match;
+        }
+        return "";
+    });
+    
+    // 4. Remove leftover random hyphens/spaces at boundaries
+    cleaned = cleaned.replace(/^\s*[-–—\s]+\s*/gm, "");
+    cleaned = cleaned.replace(/\s*[-–—\s]+\s*$/gm, "");
+    
+    // 5. Replace multiple spaces with a single space
+    cleaned = cleaned.replace(/\s+/g, " ").trim();
+    
+    return cleaned;
 }
 
 
@@ -533,15 +568,28 @@ async function sendMessage() {
             card.className = "source-card";
             const isWebSource = s.source === "web_search" || s.retrieval_method === "web_search";
             const webBadge = isWebSource ? '<span class="source-web-badge">🌐 إنترنت</span>' : '';
+            
+            const cleanLawName = cleanTextGarbage(safeDecodeURI(s.law_name));
+            const cleanArticleNum = s.article_number ? cleanTextGarbage(safeDecodeURI(s.article_number)) : "";
+            const cleanCat = cleanTextGarbage(safeDecodeURI(s.categories || ""));
+            const cleanSnippet = cleanTextGarbage(safeDecodeURI(s.snippet));
+
+            let headerTitle = "";
+            if (cleanArticleNum && cleanArticleNum !== "ويب") {
+                headerTitle = `المادة ${cleanArticleNum} — ${cleanLawName}`;
+            } else {
+                headerTitle = cleanLawName;
+            }
+
             card.innerHTML = `
                 <div class="source-header">
-                    <span class="source-name">${escapeHtml(safeDecodeURI(s.law_name))}</span>
+                    <span class="source-name">${escapeHtml(headerTitle)}</span>
                     ${webBadge}
-                    <span class="source-cat">${escapeHtml(safeDecodeURI(s.categories || ""))}</span>
+                    <span class="source-cat">${escapeHtml(cleanCat)}</span>
                     <svg class="source-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
                 </div>
                 <div class="source-body">
-                    <div class="source-text">${escapeHtml(safeDecodeURI(s.snippet))}</div>
+                    <div class="source-text">${escapeHtml(cleanSnippet)}</div>
                 </div>
             `;
             card.querySelector(".source-header").onclick = () => card.classList.toggle("open");
@@ -687,15 +735,28 @@ function appendAiMsg(text, sources = [], save = true, confidence = null, contrad
             card.className = "source-card";
             const isWebSource = s.source === "web_search" || s.retrieval_method === "web_search";
             const webBadge = isWebSource ? '<span class="source-web-badge">🌐 إنترنت</span>' : '';
+            
+            const cleanLawName = cleanTextGarbage(safeDecodeURI(s.law_name));
+            const cleanArticleNum = s.article_number ? cleanTextGarbage(safeDecodeURI(s.article_number)) : "";
+            const cleanCat = cleanTextGarbage(safeDecodeURI(s.categories || ""));
+            const cleanSnippet = cleanTextGarbage(safeDecodeURI(s.snippet));
+
+            let headerTitle = "";
+            if (cleanArticleNum && cleanArticleNum !== "ويب") {
+                headerTitle = `المادة ${cleanArticleNum} — ${cleanLawName}`;
+            } else {
+                headerTitle = cleanLawName;
+            }
+
             card.innerHTML = `
                 <div class="source-header">
-                    <span class="source-name">${escapeHtml(safeDecodeURI(s.law_name))}</span>
+                    <span class="source-name">${escapeHtml(headerTitle)}</span>
                     ${webBadge}
-                    <span class="source-cat">${escapeHtml(safeDecodeURI(s.categories || ""))}</span>
+                    <span class="source-cat">${escapeHtml(cleanCat)}</span>
                     <svg class="source-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
                 </div>
                 <div class="source-body">
-                    <div class="source-text">${escapeHtml(safeDecodeURI(s.snippet))}</div>
+                    <div class="source-text">${escapeHtml(cleanSnippet)}</div>
                 </div>
             `;
             card.querySelector(".source-header").onclick = () => card.classList.toggle("open");
