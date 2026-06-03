@@ -13,6 +13,7 @@ let debateCaseDescription = "";
 let userRole = "defense";
 let webSearchEnabled = false;
 let currentAbortController = null;
+let isWaiting = false;
 
 function safeDecodeURI(str) {
     if (!str) return "";
