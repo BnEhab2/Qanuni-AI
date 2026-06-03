@@ -94,7 +94,9 @@ import torch
 torch.set_num_threads(TORCH_NUM_THREADS)
 
 print(f"[*] Loading embedding model: {EMBEDDING_MODEL}")
-_embed_model = SentenceTransformer(EMBEDDING_MODEL)
+_embed_device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"    Target device: {_embed_device}")
+_embed_model = SentenceTransformer(EMBEDDING_MODEL, device=_embed_device)
 
 print(f"[*] Connecting to ChromaDB at: {CHROMA_DB_PATH}")
 _chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
@@ -165,14 +167,31 @@ from core.web_search import (
 
 
 class ConversationMemory:
-    """Per-session sliding window of recent user/assistant turns."""
+    """Per-session sliding window of recent user/assistant turns.
+    Bounded: evicts oldest sessions when max_sessions is reached.
+    """
+
+    MAX_SESSIONS = 500  # prevent unbounded growth
 
     def __init__(self, max_turns: int = CONVERSATION_MEMORY_MAX_TURNS):
         self._max_turns = max_turns
         self._sessions: dict[str, list[dict]] = {}
+        self._timestamps: dict[str, float] = {}  # last-access time per session
         self._lock = threading.Lock()
 
+    def _evict_if_needed(self):
+        """Evict oldest sessions when we exceed MAX_SESSIONS (call under lock)."""
+        if len(self._sessions) <= self.MAX_SESSIONS:
+            return
+        # evict the oldest 20%
+        to_evict = max(1, len(self._sessions) // 5)
+        oldest = sorted(self._timestamps, key=self._timestamps.get)[:to_evict]
+        for sid in oldest:
+            self._sessions.pop(sid, None)
+            self._timestamps.pop(sid, None)
+
     def add_turn(self, session_id: str, role: str, content: str):
+        import time as _t
         with self._lock:
             if session_id not in self._sessions:
                 self._sessions[session_id] = []
@@ -183,6 +202,8 @@ class ConversationMemory:
             max_msgs = self._max_turns * 2
             if len(self._sessions[session_id]) > max_msgs:
                 self._sessions[session_id] = self._sessions[session_id][-max_msgs:]
+            self._timestamps[session_id] = _t.time()
+            self._evict_if_needed()
 
     def get_context(self, session_id: str) -> str:
         with self._lock:
@@ -201,6 +222,7 @@ class ConversationMemory:
     def clear(self, session_id: str):
         with self._lock:
             self._sessions.pop(session_id, None)
+            self._timestamps.pop(session_id, None)
 
 
 _conversation_memory = ConversationMemory()
@@ -220,7 +242,6 @@ def search_laws(query: str, top_k: int = RERANKER_TOP_K,
         type_filter=type_filter,
         category_filter=category_filter,
     )
-    gc.collect()
     return results
 
 
@@ -458,22 +479,59 @@ def ask_llm(
     )
 
 
+# Cache helper agents/runners for specific legal roles to preserve system instructions and avoid re-creation overhead
+from core.agents.prosecutor_agent import PROSECUTOR_INSTRUCTION
+from core.agents.defense_agent import DEFENSE_INSTRUCTION
+from core.agents.judge_agent import JUDGE_INSTRUCTION
+
+_prosecutor_agent = LlmAgent(
+    name="prosecutor_agent_helper",
+    model=llm,
+    instruction=PROSECUTOR_INSTRUCTION,
+)
+_prosecutor_runner = Runner(agent=_prosecutor_agent, app_name="prosecutor_agent_helper", session_service=session_service)
+
+_defense_agent = LlmAgent(
+    name="defense_agent_helper",
+    model=llm,
+    instruction=DEFENSE_INSTRUCTION,
+)
+_defense_runner = Runner(agent=_defense_agent, app_name="defense_agent_helper", session_service=session_service)
+
+_judge_agent = LlmAgent(
+    name="judge_agent_helper",
+    model=llm,
+    instruction=JUDGE_INSTRUCTION,
+)
+_judge_runner = Runner(agent=_judge_agent, app_name="judge_agent_helper", session_service=session_service)
+
+_default_agent = LlmAgent(
+    name="multi_agent_helper",
+    model=llm,
+    instruction="You are a helpful Egyptian legal assistant.",
+)
+_default_runner = Runner(agent=_default_agent, app_name="multi_agent_helper", session_service=session_service)
+
+
 async def _generate_text_async(prompt: str, system_instruction: str = "") -> str:
-    """Helper to run a raw text completion using a temporary agent runner."""
-    from google.adk.agents import LlmAgent
-    from google.adk.runners import Runner
-    
-    agent = LlmAgent(
-        name="multi_agent_helper",
-        model=llm,
-        instruction=system_instruction or "You are a helpful Egyptian legal assistant.",
-    )
-    temp_runner = Runner(agent=agent, app_name="multi_agent_helper", session_service=session_service)
-    
+    """Helper to run a raw text completion reusing a cached agent runner matching the instruction."""
+    if system_instruction == PROSECUTOR_INSTRUCTION:
+        runner_to_use = _prosecutor_runner
+        app_name = "prosecutor_agent_helper"
+    elif system_instruction == DEFENSE_INSTRUCTION:
+        runner_to_use = _defense_runner
+        app_name = "defense_agent_helper"
+    elif system_instruction == JUDGE_INSTRUCTION:
+        runner_to_use = _judge_runner
+        app_name = "judge_agent_helper"
+    else:
+        runner_to_use = _default_runner
+        app_name = "multi_agent_helper"
+
     user_id = "default_user"
     sid = str(uuid.uuid4())
     sess_result = session_service.create_session(
-        app_name="multi_agent_helper", user_id=user_id, session_id=sid,
+        app_name=app_name, user_id=user_id, session_id=sid,
     )
     if inspect.iscoroutine(sess_result):
         session = await sess_result
@@ -486,7 +544,7 @@ async def _generate_text_async(prompt: str, system_instruction: str = "") -> str
     )
     
     response_parts = []
-    async for event in temp_runner.run_async(
+    async for event in runner_to_use.run_async(
         user_id=user_id, session_id=session.id, new_message=content,
     ):
         if event.content and event.content.parts:
@@ -564,7 +622,7 @@ def classify():
     description = data.get("description", "").strip()
     if not description:
         return jsonify({"error": "Empty description"}), 400
-    return jsonify(tool_classify_case(description, LegalReasoningChain()))
+    return jsonify(tool_classify_case(description, _deep_reasoner))
 
 
 @app.route("/api/web-search", methods=["POST"])

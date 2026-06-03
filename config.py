@@ -92,6 +92,10 @@ JWT_ACCESS_TOKEN_EXPIRES = 86400
 BCRYPT_LOG_ROUNDS = 12
 GUEST_MESSAGE_LIMIT = 5
 RATE_LIMIT_PER_MINUTE = 15
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5000,http://127.0.0.1:3000,http://127.0.0.1:5000").split(",")
+    if o.strip()
+]
 
 # Input sanitization
 MAX_INPUT_LENGTH = 2000

@@ -70,16 +70,30 @@ def retrieve_articles(
 
 def classify_case(description: str, reasoning_chain) -> dict:
     """Classify a legal case by domain using the reasoning chain."""
-    reasoning_chain.reset()
-    facts = reasoning_chain.identify_facts(description)
-    classification = reasoning_chain.classify_case(facts)
-
-    return {
-        "primary_category": classification["primary_category"],
-        "secondary_categories": classification.get("secondary_categories", []),
-        "confidence_scores": classification.get("confidence_scores", {}),
-        "detected_facts": facts.get("facts", {}),
-    }
+    if hasattr(reasoning_chain, "classify"):
+        facts = reasoning_chain.extract_facts(description)
+        classification = reasoning_chain.classify(description, facts)
+        return {
+            "primary_category": classification["primary_category"],
+            "secondary_categories": classification.get("secondary_categories", []),
+            "confidence_scores": classification.get("scores", {}),
+            "detected_facts": {
+                "parties": facts.get("parties", []),
+                "actions": facts.get("actions", []),
+                "subject": facts.get("subject", ""),
+                "keywords": facts.get("keywords", []),
+            },
+        }
+    else:
+        reasoning_chain.reset()
+        facts = reasoning_chain.identify_facts(description)
+        classification = reasoning_chain.classify_case(facts)
+        return {
+            "primary_category": classification["primary_category"],
+            "secondary_categories": classification.get("secondary_categories", []),
+            "confidence_scores": classification.get("confidence_scores", {}),
+            "detected_facts": facts.get("facts", {}),
+        }
 
 
 def retrieve_precedents(

@@ -5,6 +5,7 @@ using Reciprocal Rank Fusion (RRF).
 """
 
 import re
+import numpy as np
 import hashlib
 import threading
 import time
@@ -227,8 +228,15 @@ class HybridRetriever:
 
         return formatted
 
-    def bm25_search(self, query: str, top_k: int = BM25_TOP_K) -> list[dict]:
-        """BM25 keyword search over the corpus."""
+    def bm25_search(
+        self,
+        query: str,
+        top_k: int = BM25_TOP_K,
+        source_filter: Optional[str] = None,
+        type_filter: Optional[str] = None,
+        category_filter: Optional[str] = None,
+    ) -> list[dict]:
+        """BM25 keyword search over the corpus with metadata filtering."""
         self._build_bm25_index()
 
         query_tokens = _tokenize_arabic(query)
@@ -236,20 +244,47 @@ class HybridRetriever:
             return []
 
         scores = self._bm25.get_scores(query_tokens)
+        scores_arr = np.array(scores, dtype=np.float32)
 
-        top_indices = sorted(
-            range(len(scores)),
-            key=lambda i: scores[i],
-            reverse=True,
-        )[:top_k]
+        # Only consider docs with positive scores
+        positive_mask = scores_arr > 0
+        if not positive_mask.any():
+            return []
+
+        # Fast partial sort: pick top candidates without sorting entire array
+        # We ask for more candidates than top_k to accommodate filter rejections
+        candidate_k = min(top_k * 5, int(positive_mask.sum()))
+        if candidate_k == 0:
+            return []
+
+        # argpartition is O(N) vs O(N·logN) for full argsort
+        candidate_indices = np.argpartition(scores_arr, -candidate_k)[-candidate_k:]
+        # Now sort only the candidates
+        candidate_indices = candidate_indices[np.argsort(scores_arr[candidate_indices])[::-1]]
 
         results = []
-        for idx in top_indices:
-            if scores[idx] > 0:
-                doc = self._bm25_docs[idx].copy()
-                doc["bm25_score"] = float(scores[idx])
-                doc["retrieval_method"] = "bm25"
-                results.append(doc)
+        for idx in candidate_indices:
+            score_val = float(scores_arr[idx])
+            if score_val <= 0:
+                break
+
+            doc = self._bm25_docs[idx]
+
+            # Apply metadata filters
+            if source_filter and doc.get("source") != source_filter:
+                continue
+            if type_filter and doc.get("type") != type_filter:
+                continue
+            if category_filter and doc.get("categories") != category_filter:
+                continue
+
+            doc_copy = doc.copy()
+            doc_copy["bm25_score"] = score_val
+            doc_copy["retrieval_method"] = "bm25"
+            results.append(doc_copy)
+
+            if len(results) >= top_k:
+                break
 
         return results
 
@@ -270,7 +305,12 @@ class HybridRetriever:
             type_filter=type_filter,
             category_filter=category_filter,
         )
-        bm25_results = self.bm25_search(query, top_k=top_k)
+        bm25_results = self.bm25_search(
+            query, top_k=top_k,
+            source_filter=source_filter,
+            type_filter=type_filter,
+            category_filter=category_filter,
+        )
 
         RRF_K = 60
         score_map: dict[str, dict] = {}

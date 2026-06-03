@@ -113,9 +113,13 @@ def chat():
     else:
         conv = get_conversation(conversation_id)
         if conv:
-            if g.user_id and conv["user_id"] != g.user_id:
-                return jsonify({"error": "غير مصرح."}), 403
-            if g.guest_id and conv["guest_id"] != g.guest_id:
+            if g.auth_type == "user":
+                if conv["user_id"] != g.user_id:
+                    return jsonify({"error": "غير مصرح."}), 403
+            elif g.auth_type == "guest":
+                if conv["guest_id"] != g.guest_id:
+                    return jsonify({"error": "غير مصرح."}), 403
+            else:
                 return jsonify({"error": "غير مصرح."}), 403
         else:
             conversation_id = create_conversation(
@@ -350,7 +354,24 @@ def chat_stream():
     guest_id = g.guest_id
     auth_type = g.auth_type
 
-    if not conversation_id:
+    if conversation_id:
+        conv = get_conversation(conversation_id)
+        if conv:
+            if g.auth_type == "user":
+                if conv["user_id"] != g.user_id:
+                    return jsonify({"error": "غير مصرح."}), 403
+            elif g.auth_type == "guest":
+                if conv["guest_id"] != g.guest_id:
+                    return jsonify({"error": "غير مصرح."}), 403
+            else:
+                return jsonify({"error": "غير مصرح."}), 403
+        else:
+            conversation_id = create_conversation(
+                user_id=user_id,
+                guest_id=guest_id,
+                title=_auto_title(user_message),
+            )
+    else:
         conversation_id = create_conversation(
             user_id=user_id,
             guest_id=guest_id,
@@ -638,7 +659,25 @@ def debate():
     if case_description:
         case_description, _ = sanitize_input(case_description)
 
-    if not conversation_id:
+    if conversation_id:
+        conv = get_conversation(conversation_id)
+        if conv:
+            if g.auth_type == "user":
+                if conv["user_id"] != g.user_id:
+                    return jsonify({"error": "غير مصرح."}), 403
+            elif g.auth_type == "guest":
+                if conv["guest_id"] != g.guest_id:
+                    return jsonify({"error": "غير مصرح."}), 403
+            else:
+                return jsonify({"error": "غير مصرح."}), 403
+        else:
+            conversation_id = create_conversation(
+                user_id=g.user_id,
+                guest_id=g.guest_id,
+                title="مناظرة: " + _auto_title(case_description or user_message),
+                mode="debate",
+            )
+    else:
         conversation_id = create_conversation(
             user_id=g.user_id,
             guest_id=g.guest_id,

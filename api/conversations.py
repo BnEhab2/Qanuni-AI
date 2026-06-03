@@ -42,9 +42,13 @@ def get_single_conversation(conv_id: str):
     if not conv:
         return jsonify({"error": "المحادثة غير موجودة."}), 404
 
-    if g.user_id and conv["user_id"] != g.user_id:
-        return jsonify({"error": "غير مصرح."}), 403
-    if g.guest_id and conv["guest_id"] != g.guest_id:
+    if g.auth_type == "user":
+        if conv["user_id"] != g.user_id:
+            return jsonify({"error": "غير مصرح."}), 403
+    elif g.auth_type == "guest":
+        if conv["guest_id"] != g.guest_id:
+            return jsonify({"error": "غير مصرح."}), 403
+    else:
         return jsonify({"error": "غير مصرح."}), 403
 
     messages = get_messages(conv_id)
@@ -91,9 +95,13 @@ def update_title(conv_id: str):
     if not conv:
         return jsonify({"error": "المحادثة غير موجودة."}), 404
 
-    if g.user_id and conv["user_id"] != g.user_id:
-        return jsonify({"error": "غير مصرح."}), 403
-    if g.guest_id and conv["guest_id"] != g.guest_id:
+    if g.auth_type == "user":
+        if conv["user_id"] != g.user_id:
+            return jsonify({"error": "غير مصرح."}), 403
+    elif g.auth_type == "guest":
+        if conv["guest_id"] != g.guest_id:
+            return jsonify({"error": "غير مصرح."}), 403
+    else:
         return jsonify({"error": "غير مصرح."}), 403
 
     data = request.get_json(force=True)
@@ -114,9 +122,13 @@ def delete_conv(conv_id: str):
     if not conv:
         return jsonify({"error": "المحادثة غير موجودة."}), 404
 
-    if g.user_id and conv["user_id"] != g.user_id:
-        return jsonify({"error": "غير مصرح."}), 403
-    if g.guest_id and conv["guest_id"] != g.guest_id:
+    if g.auth_type == "user":
+        if conv["user_id"] != g.user_id:
+            return jsonify({"error": "غير مصرح."}), 403
+    elif g.auth_type == "guest":
+        if conv["guest_id"] != g.guest_id:
+            return jsonify({"error": "غير مصرح."}), 403
+    else:
         return jsonify({"error": "غير مصرح."}), 403
 
     delete_conversation(conv_id)

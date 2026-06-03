@@ -9,6 +9,7 @@ Usage:
 
 import os
 import sys
+import re
 import hashlib
 import argparse
 import pandas as pd
@@ -33,25 +34,57 @@ from config import (
 
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP_WORDS) -> list[str]:
-    """Split text into overlapping chunks by character count."""
+    """Split text into overlapping chunks respecting sentence boundaries."""
     if len(text) <= chunk_size:
         return [text]
 
+    # Split by Arabic/English sentence delimiters: period, semicolon, question mark, exclamation, or newline
+    sentences = re.split(r'(?<=[.؛!؟\n])\s+', text)
     chunks = []
-    words = text.split()
-    current: list[str] = []
+    current_chunk = []
     current_len = 0
 
-    for w in words:
-        current.append(w)
-        current_len += len(w) + 1
-        if current_len >= chunk_size:
-            chunks.append(" ".join(current))
-            current = current[-overlap:]
-            current_len = sum(len(x) + 1 for x in current)
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        
+        # If a single sentence is larger than chunk_size, fallback to word splitting for it
+        if len(sentence) > chunk_size:
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+                current_chunk = []
+                current_len = 0
+            
+            words = sentence.split()
+            sub_chunk = []
+            sub_len = 0
+            for w in words:
+                sub_chunk.append(w)
+                sub_len += len(w) + 1
+                if sub_len >= chunk_size:
+                    chunks.append(" ".join(sub_chunk))
+                    sub_chunk = sub_chunk[-overlap:] if len(sub_chunk) > overlap else []
+                    sub_len = sum(len(x) + 1 for x in sub_chunk)
+            if sub_chunk:
+                chunks.append(" ".join(sub_chunk))
+            continue
 
-    if current:
-        chunks.append(" ".join(current))
+        if current_len + len(sentence) + 1 > chunk_size:
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+            
+            # Keep up to 2 sentences as overlap for context continuity
+            overlap_sentences = current_chunk[-2:] if len(current_chunk) >= 2 else current_chunk[-1:] if current_chunk else []
+            current_chunk = list(overlap_sentences)
+            current_chunk.append(sentence)
+            current_len = sum(len(s) + 1 for s in current_chunk)
+        else:
+            current_chunk.append(sentence)
+            current_len += len(sentence) + 1
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
 
     return chunks
 

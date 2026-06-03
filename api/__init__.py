@@ -18,7 +18,7 @@ def create_app():
     app.config["JWT_SECRET_KEY"] = config.JWT_SECRET_KEY
     app.config["JWT_ACCESS_TOKEN_EXPIRES"] = config.JWT_ACCESS_TOKEN_EXPIRES
 
-    CORS(app)
+    CORS(app, resources={r"/api/*": {"origins": config.ALLOWED_ORIGINS}})
     JWTManager(app)
     init_db()
 

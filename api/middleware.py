@@ -43,8 +43,8 @@ def _check_rate(ip: str, max_per_minute: int = RATE_LIMIT_PER_MINUTE) -> bool:
 
         _rates[ip].append(now)
 
-        # Cleanup stale IPs
-        if len(_rates) > 1000:
+        # Periodic cleanup of stale IPs (every 200 IPs to avoid unbounded growth)
+        if len(_rates) > 200:
             stale = [k for k, v in _rates.items() if not v or v[-1] < now - 300]
             for k in stale:
                 del _rates[k]
@@ -161,5 +161,4 @@ def sanitize_input(text: str) -> tuple[str, bool]:
             has_injection = True
             break
 
-    text = html.escape(text)
     return text, has_injection

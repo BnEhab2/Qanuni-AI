@@ -37,13 +37,14 @@ class LegalReranker:
 
             from sentence_transformers import CrossEncoder
 
-            print(f"[Reranker] Loading model: {self._model_name}")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"[Reranker] Loading model: {self._model_name} on {device}")
             t0 = time.time()
 
             self._model = CrossEncoder(
                 self._model_name,
                 max_length=512,
-                device="cpu",
+                device=device,
             )
 
             print(f"[Reranker] Model loaded in {time.time() - t0:.2f}s")

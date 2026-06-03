@@ -36,9 +36,11 @@ def _set_cache(key: str, result: str):
     """Store result in cache."""
     with _cache_lock:
         _cache[key] = (time.time(), result)
-        if len(_cache) > 100:
-            oldest = min(_cache, key=lambda k: _cache[k][0])
-            del _cache[oldest]
+        if len(_cache) > 80:
+            # Evict oldest 20% to keep cache bounded
+            sorted_keys = sorted(_cache, key=lambda k: _cache[k][0])
+            for k in sorted_keys[:len(sorted_keys) // 5]:
+                del _cache[k]
 
 
 def _extract_search_keywords(query: str) -> str:

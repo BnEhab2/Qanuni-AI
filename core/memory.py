@@ -65,6 +65,8 @@ class CaseMemoryStore:
         """New connection per call (thread-safe)."""
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _init_db(self):
@@ -173,19 +175,24 @@ class CaseMemoryStore:
         top_k: int = CASE_MEMORY_SIMILAR_TOP_K,
         category_filter: Optional[str] = None,
     ) -> list[dict]:
-        """Find similar past cases by embedding cosine similarity."""
+        """Find similar past cases by embedding cosine similarity (vectorized)."""
         query_embedding = self._encode_query(query)
+        query_arr = np.array(query_embedding, dtype=np.float32)
+        query_norm = np.linalg.norm(query_arr)
+        if query_norm == 0:
+            return []
+        query_arr /= query_norm
 
         conn = self._get_conn()
         try:
             if category_filter:
                 rows = conn.execute(
-                    "SELECT * FROM case_memory WHERE category = ? ORDER BY created_at DESC",
+                    "SELECT * FROM case_memory WHERE category = ? ORDER BY created_at DESC LIMIT 200",
                     (category_filter,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM case_memory ORDER BY created_at DESC"
+                    "SELECT * FROM case_memory ORDER BY created_at DESC LIMIT 200"
                 ).fetchall()
         finally:
             conn.close()
@@ -193,14 +200,28 @@ class CaseMemoryStore:
         if not rows:
             return []
 
-        scored = []
-        for row in rows:
+        # Batch vectorized cosine similarity
+        embeddings = []
+        valid_indices = []
+        for i, row in enumerate(rows):
             if row["query_embedding"]:
                 stored = _unpack_embedding(row["query_embedding"])
-                sim = _cosine_similarity(query_embedding, stored)
-            else:
-                sim = 0.0
+                embeddings.append(stored)
+                valid_indices.append(i)
 
+        if not embeddings:
+            return []
+
+        emb_matrix = np.array(embeddings, dtype=np.float32)
+        norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0  # avoid division by zero
+        emb_matrix /= norms
+        similarities = emb_matrix @ query_arr  # single matrix-vector multiply
+
+        # Build results with scores
+        scored = []
+        for rank, (vi, sim) in enumerate(zip(valid_indices, similarities)):
+            row = rows[vi]
             scored.append({
                 "id":             row["id"],
                 "user_query":     row["user_query"],
@@ -209,7 +230,7 @@ class CaseMemoryStore:
                 "reasoning":      row["reasoning"],
                 "category":       row["category"],
                 "created_at":     row["created_at"],
-                "similarity":     sim,
+                "similarity":     float(sim),
             })
 
         scored.sort(key=lambda x: x["similarity"], reverse=True)
