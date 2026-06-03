@@ -156,6 +156,28 @@ def chat():
         category_filter=category_filter,
     )
 
+    if web_search_enabled:
+        try:
+            from core.web_search import _ddg_search
+            print(f"[WebSearch] Executing pre-reasoning web search for: {user_message[:50]}...")
+            web_raw = _ddg_search(user_message, max_results=4)
+            web_results = []
+            for r in web_raw:
+                web_results.append({
+                    "law_name": r.get("title", "نتيجة بحث ويب"),
+                    "text": r.get("body", ""),
+                    "categories": "إنترنت / أخبار",
+                    "source": "web_search",
+                    "type": "web",
+                    "citation": r.get("href", ""),
+                    "article_number": "ويب",
+                    "reranker_score": 0.95,
+                    "retrieval_method": "web_search"
+                })
+            results = web_results + results
+        except Exception as e:
+            print(f"[WebSearch] Pre-reasoning search failed: {e}")
+
     deep_reasoner = _services.get("deep_reasoner")
     contradiction_detector = _services.get("contradiction_detector")
     confidence_scorer = _services.get("confidence_scorer")
@@ -362,6 +384,28 @@ def chat_stream():
                 type_filter=type_filter,
                 category_filter=category_filter,
             )
+
+            if web_search_enabled:
+                try:
+                    from core.web_search import _ddg_search
+                    print(f"[WebSearch] Executing pre-reasoning web search for: {user_message[:50]}...")
+                    web_raw = _ddg_search(user_message, max_results=4)
+                    web_results = []
+                    for r in web_raw:
+                        web_results.append({
+                            "law_name": r.get("title", "نتيجة بحث ويب"),
+                            "text": r.get("body", ""),
+                            "categories": "إنترنت / أخبار",
+                            "source": "web_search",
+                            "type": "web",
+                            "citation": r.get("href", ""),
+                            "article_number": "ويب",
+                            "reranker_score": 0.95,
+                            "retrieval_method": "web_search"
+                        })
+                    results = web_results + results
+                except Exception as e:
+                    print(f"[WebSearch] Pre-reasoning search failed: {e}")
 
             deep_reasoner = _services.get("deep_reasoner")
             contradiction_detector = _services.get("contradiction_detector")

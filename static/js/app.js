@@ -12,8 +12,54 @@ let debateSessionId = null;
 let debateCaseDescription = "";
 let userRole = "defense";
 let webSearchEnabled = false;
-let isWaiting = false;
 let currentAbortController = null;
+
+function safeDecodeURI(str) {
+    if (!str) return "";
+    try {
+        // Fix missing percent signs in sequences like 'D8%AA' or 'D9%88' at word boundaries
+        let normalized = str.replace(/\b([0-9A-Fa-f]{2})%([0-9A-Fa-f]{2})/g, "%$1%$2");
+        
+        // Remove spaces and hyphens between percent/hex pairs if they are part of a continuous encoding
+        normalized = normalized.replace(/(%[0-9A-Fa-f]{2})\s*-\s*(%[0-9A-Fa-f]{2})/g, "$1$2");
+        normalized = normalized.replace(/(%[0-9A-Fa-f]{2})\s+(%[0-9A-Fa-f]{2})/g, "$1$2");
+        
+        // Handle spaces inside a single code like '% D 8' or '% A 7'
+        normalized = normalized.replace(/%\s*([0-9A-Fa-f])\s*([0-9A-Fa-f])/g, "%$1$2");
+
+        // Decode contiguous percent-encoded sequences
+        return normalized.replace(/(%[0-9A-Fa-f]{2})+/g, (match) => {
+            try {
+                return decodeURIComponent(match);
+            } catch (e) {
+                // If the entire block fails, try to decode the longest possible valid sub-sequences
+                let decoded = "";
+                let i = 0;
+                while (i < match.length) {
+                    let success = false;
+                    for (let len = match.length - i; len >= 3; len -= 3) {
+                        let sub = match.substr(i, len);
+                        try {
+                            decoded += decodeURIComponent(sub);
+                            i += len;
+                            success = true;
+                            break;
+                        } catch (err) {}
+                    }
+                    if (!success) {
+                        decoded += match.substr(i, 3);
+                        i += 3;
+                    }
+                }
+                return decoded;
+            }
+        });
+    } catch (e) {
+        // Fallback on total failure
+    }
+    return str;
+}
+
 
 const DOM = {
     chatContainer:   document.getElementById("chat-container"),
@@ -488,13 +534,13 @@ async function sendMessage() {
             const webBadge = isWebSource ? '<span class="source-web-badge">🌐 إنترنت</span>' : '';
             card.innerHTML = `
                 <div class="source-header">
-                    <span class="source-name">${escapeHtml(s.law_name)}</span>
+                    <span class="source-name">${escapeHtml(safeDecodeURI(s.law_name))}</span>
                     ${webBadge}
-                    <span class="source-cat">${escapeHtml(s.categories || "")}</span>
+                    <span class="source-cat">${escapeHtml(safeDecodeURI(s.categories || ""))}</span>
                     <svg class="source-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
                 </div>
                 <div class="source-body">
-                    <div class="source-text">${escapeHtml(s.snippet)}</div>
+                    <div class="source-text">${escapeHtml(safeDecodeURI(s.snippet))}</div>
                 </div>
             `;
             card.querySelector(".source-header").onclick = () => card.classList.toggle("open");
@@ -631,7 +677,6 @@ function appendAiMsg(text, sources = [], save = true, confidence = null, contrad
         renderJudgeDecision(contentWrapper, judgeDecision);
     }
 
-    // Citations
     if (sources && sources.length > 0) {
         const srcContainer = document.createElement("div");
         srcContainer.className = "sources-container";
@@ -643,13 +688,13 @@ function appendAiMsg(text, sources = [], save = true, confidence = null, contrad
             const webBadge = isWebSource ? '<span class="source-web-badge">🌐 إنترنت</span>' : '';
             card.innerHTML = `
                 <div class="source-header">
-                    <span class="source-name">${escapeHtml(s.law_name)}</span>
+                    <span class="source-name">${escapeHtml(safeDecodeURI(s.law_name))}</span>
                     ${webBadge}
-                    <span class="source-cat">${escapeHtml(s.categories || "")}</span>
+                    <span class="source-cat">${escapeHtml(safeDecodeURI(s.categories || ""))}</span>
                     <svg class="source-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
                 </div>
                 <div class="source-body">
-                    <div class="source-text">${escapeHtml(s.snippet)}</div>
+                    <div class="source-text">${escapeHtml(safeDecodeURI(s.snippet))}</div>
                 </div>
             `;
             card.querySelector(".source-header").onclick = () => card.classList.toggle("open");
@@ -703,7 +748,7 @@ function renderConfidence(wrapper, conf) {
         conf.warnings.forEach(w => {
             const p = document.createElement("div");
             p.className = "warning-item";
-            p.textContent = w;
+            p.textContent = safeDecodeURI(w);
             warnDiv.appendChild(p);
         });
         wrapper.appendChild(warnDiv);
@@ -725,11 +770,11 @@ function renderContradictions(wrapper, contradictions) {
         card.className = `contradiction-card severity-${c.severity}`;
         card.innerHTML = `
             <div class="contradiction-header">
-                <span class="contradiction-title">${escapeHtml(c.article_a_name)} ↔ ${escapeHtml(c.article_b_name)}</span>
+                <span class="contradiction-title">${escapeHtml(safeDecodeURI(c.article_a_name))} ↔ ${escapeHtml(safeDecodeURI(c.article_b_name))}</span>
             </div>
             <div class="contradiction-body">
-                <div class="contradiction-desc">${escapeHtml(c.description)}</div>
-                ${c.resolution_hint ? `<div class="contradiction-hint"><strong>الحل المقترح:</strong> ${escapeHtml(c.resolution_hint)}</div>` : ''}
+                <div class="contradiction-desc">${escapeHtml(safeDecodeURI(c.description))}</div>
+                ${c.resolution_hint ? `<div class="contradiction-hint"><strong>الحل المقترح:</strong> ${escapeHtml(safeDecodeURI(c.resolution_hint))}</div>` : ''}
             </div>
         `;
         container.appendChild(card);
@@ -761,12 +806,12 @@ function renderRisks(wrapper, risks) {
         card.className = `risk-card risk-level-${r.risk_level}`;
         card.innerHTML = `
             <div class="risk-header">
-                <span class="risk-issue">${escapeHtml(r.issue)}</span>
-                <span class="risk-badge">${escapeHtml(r.risk_level.toUpperCase())}</span>
+                <span class="risk-issue">${escapeHtml(safeDecodeURI(r.issue))}</span>
+                <span class="risk-badge">${escapeHtml(safeDecodeURI(r.risk_level.toUpperCase()))}</span>
             </div>
             <div class="risk-body">
-                <div class="risk-detail"><strong>الشدة:</strong> ${escapeHtml(r.severity)} | <strong>الاحتمالية:</strong> ${escapeHtml(r.probability)}</div>
-                <div class="risk-desc">${escapeHtml(r.description)}</div>
+                <div class="risk-detail"><strong>الشدة:</strong> ${escapeHtml(safeDecodeURI(r.severity))} | <strong>الاحتمالية:</strong> ${escapeHtml(safeDecodeURI(r.probability))}</div>
+                <div class="risk-desc">${escapeHtml(safeDecodeURI(r.description))}</div>
             </div>
         `;
         grid.appendChild(card);
@@ -1072,7 +1117,7 @@ function renderAdvocacy(wrapper, prosecution, defense) {
             prosDiv.className = "advocacy-side prosecution-side";
             container.appendChild(prosDiv);
         }
-        const articlesHtml = (prosecution.supporting_articles || []).map(a => `<li>${escapeHtml(a)}</li>`).join("");
+        const articlesHtml = (prosecution.supporting_articles || []).map(a => `<li>${escapeHtml(safeDecodeURI(a))}</li>`).join("");
         const riskLabel = prosecution.risk_view === "high" ? "عالي الخطورة" : prosecution.risk_view === "medium" ? "متوسط" : "منخفض";
         prosDiv.innerHTML = `
             <div class="side-header">
@@ -1080,8 +1125,8 @@ function renderAdvocacy(wrapper, prosecution, defense) {
                 <span class="side-title">مرافعة النيابة العامة (الادعاء)</span>
             </div>
             <div class="side-body">
-                <p class="side-arg"><strong>الاتهام الأساسي:</strong> ${escapeHtml(prosecution.argument || "")}</p>
-                <div class="side-reasoning"><strong>منطق النيابة:</strong> ${escapeHtml(prosecution.reasoning || "")}</div>
+                <p class="side-arg"><strong>الاتهام الأساسي:</strong> ${escapeHtml(safeDecodeURI(prosecution.argument || ""))}</p>
+                <div class="side-reasoning"><strong>منطق النيابة:</strong> ${escapeHtml(safeDecodeURI(prosecution.reasoning || ""))}</div>
                 ${articlesHtml ? `<div class="side-articles"><strong>المواد المستند إليها:</strong><ul>${articlesHtml}</ul></div>` : ""}
             </div>
             <div class="side-footer">
@@ -1099,7 +1144,7 @@ function renderAdvocacy(wrapper, prosecution, defense) {
             defDiv.className = "advocacy-side defense-side";
             container.appendChild(defDiv);
         }
-        const articlesHtml = (defense.supporting_articles || []).map(a => `<li>${escapeHtml(a)}</li>`).join("");
+        const articlesHtml = (defense.supporting_articles || []).map(a => `<li>${escapeHtml(safeDecodeURI(a))}</li>`).join("");
         const riskLabel = defense.risk_view === "high" ? "شديد" : defense.risk_view === "medium" ? "متوسط" : "مخفف";
         defDiv.innerHTML = `
             <div class="side-header">
@@ -1107,8 +1152,8 @@ function renderAdvocacy(wrapper, prosecution, defense) {
                 <span class="side-title">دفوع محامي الدفاع</span>
             </div>
             <div class="side-body">
-                <p class="side-arg"><strong>الحجة الأساسية:</strong> ${escapeHtml(defense.argument || "")}</p>
-                <div class="side-reasoning"><strong>منطق الدفاع:</strong> ${escapeHtml(defense.reasoning || "")}</div>
+                <p class="side-arg"><strong>الحجة الأساسية:</strong> ${escapeHtml(safeDecodeURI(defense.argument || ""))}</p>
+                <div class="side-reasoning"><strong>منطق الدفاع:</strong> ${escapeHtml(safeDecodeURI(defense.reasoning || ""))}</div>
                 ${articlesHtml ? `<div class="side-articles"><strong>المواد المستند إليها:</strong><ul>${articlesHtml}</ul></div>` : ""}
             </div>
             <div class="side-footer">
@@ -1135,21 +1180,21 @@ function renderJudgeDecision(wrapper, decision) {
         verdictIcon = "🕊️";
     }
     
-    const factorsHtml = (decision.key_factors || []).map(f => `<li>${escapeHtml(f)}</li>`).join("");
+    const factorsHtml = (decision.key_factors || []).map(f => `<li>${escapeHtml(safeDecodeURI(f))}</li>`).join("");
     
     container.innerHTML = `
         <div class="judge-header">
             <span class="judge-icon">${verdictIcon}</span>
             <div class="judge-title-box">
                 <span class="judge-title">حكم منصة القضاء</span>
-                <span class="judge-verdict-badge verdict-${decision.verdict}">الحكم: ${escapeHtml(decision.verdict_ar || "")}</span>
+                <span class="judge-verdict-badge verdict-${decision.verdict}">الحكم: ${escapeHtml(safeDecodeURI(decision.verdict_ar || ""))}</span>
             </div>
             <span class="judge-confidence">ثقة المحكمة: ${Math.round((decision.confidence || 0) * 100)}%</span>
         </div>
         <div class="judge-body">
             <div class="judge-reasoning">
                 <strong>حيثيات الحكم وأسبابه:</strong>
-                <p>${escapeHtml(decision.reasoning || "")}</p>
+                <p>${escapeHtml(safeDecodeURI(decision.reasoning || ""))}</p>
             </div>
             ${factorsHtml ? `
             <div class="judge-factors">
