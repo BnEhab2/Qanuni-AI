@@ -10,6 +10,7 @@ from config import (
     TOP_K,
     RERANKER_TOP_K,
     HYBRID_CANDIDATE_K,
+    USE_RERANKER,
 )
 
 
@@ -33,6 +34,13 @@ def search_laws(
 
     if not candidates:
         return []
+
+    if not USE_RERANKER:
+        # Bypass reranking: return candidates directly
+        results = candidates[:top_k]
+        for doc in results:
+            doc["citation"] = format_citation(doc)
+        return results
 
     reranked = reranker.rerank(query=query, documents=candidates, top_k=top_k)
 
@@ -58,6 +66,14 @@ def retrieve_articles(
     candidates = retriever.hybrid_search(query=query, top_k=top_k * 2)
     if not candidates:
         return []
+
+    if not USE_RERANKER:
+        # Bypass reranking: return candidates directly
+        results = candidates[:top_k]
+        for doc in results:
+            doc["citation"] = format_citation(doc)
+            doc["article_number"] = _extract_article_number(doc.get("text", ""))
+        return results
 
     reranked = reranker.rerank(query=query, documents=candidates, top_k=top_k)
 

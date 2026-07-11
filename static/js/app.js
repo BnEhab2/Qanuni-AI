@@ -125,6 +125,13 @@ window.addEventListener("DOMContentLoaded", async () => {
     await Sidebar.loadConversations();
     Sidebar.initSearch();
     Sidebar.initMobile();
+    
+    // Load legal glossary
+    try {
+        await loadGlossary();
+    } catch (e) {
+        console.error("Failed to load glossary during startup", e);
+    }
 
     // 3. Bind UI click handlers
     if (DOM.newChatTopBtn) DOM.newChatTopBtn.onclick = newChat;
@@ -257,8 +264,282 @@ window.addEventListener("DOMContentLoaded", async () => {
         };
     });
 
+    // ── Document Ingestion and Upload Event Bindings ──
+    const fileUploadBtn = document.getElementById("file-upload-btn");
+    const fileUploadInput = document.getElementById("file-upload-input");
+
+    if (fileUploadBtn && fileUploadInput) {
+        fileUploadBtn.onclick = () => {
+            fileUploadInput.click();
+        };
+
+        fileUploadInput.onchange = async () => {
+            if (fileUploadInput.files.length === 0) return;
+            const file = fileUploadInput.files[0];
+            
+            // Render user upload message
+            appendUserMsg(`📎 جاري تحميل وتحليل ملف: ${file.name}`);
+            
+            // Show loading indicator
+            showThinking();
+            
+            const formData = new FormData();
+            formData.append("file", file);
+            
+            try {
+                const res = await fetch("/api/documents/upload", {
+                    method: "POST",
+                    headers: Sidebar.getHeaders(), // Send JWT/Auth headers
+                    body: formData
+                });
+                
+                // Remove thinking
+                const thinkingRow = document.getElementById("thinking-row");
+                if (thinkingRow) thinkingRow.remove();
+                
+                if (res.ok) {
+                    const data = await res.json();
+                    appendAiMsg(
+                        `📄 **تم الانتهاء من تحليل المستند القانوني:** \`${data.filename}\`\n\nإليك الوقائع والتحليلات الجنائية والمدنية المكتشفة:`,
+                        data.retrieved_laws || [],
+                        true, // Save
+                        data.confidence,
+                        data.contradictions,
+                        data.risks,
+                        data.prosecution,
+                        data.defense,
+                        data.judge_decision
+                    );
+                } else {
+                    const err = await res.json();
+                    appendAiMsg(`❌ فشل تحليل المستند: ${err.error || "خطأ غير معروف"}`, []);
+                }
+            } catch (e) {
+                console.error(e);
+                const thinkingRow = document.getElementById("thinking-row");
+                if (thinkingRow) thinkingRow.remove();
+                appendAiMsg("❌ عذراً، حصل خطأ أثناء الاتصال بالخادم لتحميل المستند.", []);
+            }
+            
+            // Clear input for future selections
+            fileUploadInput.value = "";
+        };
+    }
+
+    // ── Drafting Assistant Event Bindings ──
+    const draftDocBtn = document.getElementById("draft-doc-btn");
+    const draftModal = document.getElementById("draft-modal");
+    const draftCloseBtn = document.getElementById("draft-close-btn");
+    const draftForm = document.getElementById("draft-form");
+
+    if (draftDocBtn && draftModal) {
+        draftDocBtn.onclick = () => {
+            draftModal.classList.add("visible");
+        };
+    }
+    if (draftCloseBtn && draftModal) {
+        draftCloseBtn.onclick = () => {
+            draftModal.classList.remove("visible");
+        };
+    }
+
+    if (draftForm && draftModal) {
+        draftForm.onsubmit = async (e) => {
+            e.preventDefault();
+            
+            const templateType = document.getElementById("draft-template-type").value;
+            const caseDetails = document.getElementById("draft-case-details").value.trim();
+            const customInstructions = document.getElementById("draft-custom-instructions").value.trim();
+            
+            draftModal.classList.remove("visible");
+            
+            // Render user request message
+            let typeLabel = "عقد قانوني";
+            if (templateType === "memo") typeLabel = "مذكرة دفاع";
+            else if (templateType === "petition") typeLabel = "صحيفة دعوى";
+            
+            appendUserMsg(`📝 طلب صياغة ${typeLabel} للموقف التالي:\n${caseDetails}`);
+            
+            // Show loading indicator
+            showThinking();
+            
+            try {
+                const res = await fetch("/api/draft", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        ...Sidebar.getHeaders()
+                    },
+                    body: JSON.stringify({
+                        template_type: templateType,
+                        case_details: caseDetails,
+                        custom_instructions: customInstructions
+                    })
+                });
+                
+                // Remove thinking
+                const thinkingRow = document.getElementById("thinking-row");
+                if (thinkingRow) thinkingRow.remove();
+                
+                if (res.ok) {
+                    const data = await res.json();
+                    appendAiMsg(data.draft, [], true);
+                } else {
+                    const err = await res.json();
+                    appendAiMsg(`❌ فشل الصياغة القانونية: ${err.error || "خطأ غير معروف"}`, []);
+                }
+            } catch (e) {
+                console.error(e);
+                const thinkingRow = document.getElementById("thinking-row");
+                if (thinkingRow) thinkingRow.remove();
+                appendAiMsg("❌ عذراً، حصل خطأ أثناء الاتصال بالخادم لبدء الصياغة.", []);
+            }
+            
+            // Clear textarea inputs
+            document.getElementById("draft-case-details").value = "";
+            document.getElementById("draft-custom-instructions").value = "";
+        };
+    }
+
+    // ── Voice Input (Microphone) Binding ──
+    const micBtn = document.getElementById("mic-btn");
+    if (micBtn && ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'ar-EG';
+        recognition.interimResults = true;
+        recognition.continuous = false;
+
+        let isRecording = false;
+
+        micBtn.onclick = () => {
+            if (isRecording) {
+                recognition.stop();
+                return;
+            }
+            isRecording = true;
+            micBtn.classList.add('mic-active');
+            micBtn.title = 'جاري الاستماع... اضغط لإيقاف';
+            recognition.start();
+        };
+
+        recognition.onresult = (event) => {
+            let transcript = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                transcript += event.results[i][0].transcript;
+            }
+            if (DOM.input) {
+                DOM.input.value = transcript;
+                autoResize();
+                updateSendBtn();
+            }
+        };
+
+        recognition.onend = () => {
+            isRecording = false;
+            micBtn.classList.remove('mic-active');
+            micBtn.title = 'إدخال صوتي باللغة العربية';
+        };
+
+        recognition.onerror = (event) => {
+            console.warn('[Voice] Recognition error:', event.error);
+            isRecording = false;
+            micBtn.classList.remove('mic-active');
+            micBtn.title = 'إدخال صوتي باللغة العربية';
+            if (event.error === 'not-allowed') {
+                showToast('يرجى السماح بصلاحية الميكروفون في المتصفح.', true);
+            }
+        };
+    } else if (micBtn) {
+        micBtn.style.display = 'none';
+    }
+
+    // ── Citation Viewer Click Delegation ──
+    document.body.addEventListener('click', (e) => {
+        const citationEl = e.target.closest('.citation-link');
+        if (citationEl) {
+            e.preventDefault();
+            const citationModal = document.getElementById('citation-modal');
+            if (!citationModal) return;
+
+            const lawName = citationEl.dataset.lawName || 'مادة قانونية';
+            const articleNum = citationEl.dataset.articleNum || '';
+            const snippet = citationEl.dataset.snippet || citationEl.textContent;
+            const fullText = citationEl.dataset.fullText || snippet;
+            const sourceUrl = citationEl.dataset.sourceUrl || '#';
+
+            document.getElementById('citation-modal-title').innerText = articleNum ? `المادة ${articleNum} — ${lawName}` : lawName;
+            
+            // Highlight the cited snippet within the full text
+            let displayText = escapeHtml(fullText);
+            if (snippet && fullText.includes(snippet)) {
+                displayText = displayText.replace(
+                    escapeHtml(snippet),
+                    `<mark style="background-color: rgba(37,99,235,0.2); color: #fff; padding: 2px 4px; border-radius: 3px;">${escapeHtml(snippet)}</mark>`
+                );
+            }
+            document.getElementById('citation-modal-content').innerHTML = displayText;
+
+            document.getElementById('citation-modal-meta').innerText = lawName;
+            const linkEl = document.getElementById('citation-modal-link');
+            if (sourceUrl && sourceUrl !== '#') {
+                linkEl.href = sourceUrl;
+                linkEl.style.display = 'flex';
+            } else {
+                linkEl.style.display = 'none';
+            }
+
+            citationModal.classList.add('visible');
+        }
+    });
+
+    // Citation modal close
+    const citationCloseBtn = document.getElementById('citation-close-btn');
+    const citationModal = document.getElementById('citation-modal');
+    if (citationCloseBtn && citationModal) {
+        citationCloseBtn.onclick = () => citationModal.classList.remove('visible');
+    }
+
     newChat();
     if (DOM.input) DOM.input.focus();
+
+    // Glossary Tooltip Popover Event Delegation
+    const tooltip = document.getElementById("glossary-tooltip");
+    if (tooltip) {
+        document.body.addEventListener("mouseover", (e) => {
+            const termSpan = e.target.closest(".glossary-term");
+            if (termSpan) {
+                const term = termSpan.dataset.term;
+                const definition = glossaryDict[term];
+                if (definition) {
+                    tooltip.innerHTML = `<strong>${term}:</strong> ${definition}`;
+                    tooltip.style.display = "block";
+                    
+                    const rect = termSpan.getBoundingClientRect();
+                    const tooltipRect = tooltip.getBoundingClientRect();
+                    
+                    let left = rect.left + window.scrollX + (rect.width / 2) - (tooltipRect.width / 2);
+                    left = Math.max(10, left);
+                    
+                    let top = rect.top + window.scrollY - tooltipRect.height - 8;
+                    if (rect.top - tooltipRect.height < 10) {
+                        top = rect.bottom + window.scrollY + 8;
+                    }
+                    
+                    tooltip.style.left = `${left}px`;
+                    tooltip.style.top = `${top}px`;
+                    tooltip.classList.add("visible");
+                }
+            }
+        });
+        
+        document.body.addEventListener("mouseout", (e) => {
+            if (e.target.closest(".glossary-term")) {
+                tooltip.classList.remove("visible");
+                tooltip.style.display = "none";
+            }
+        });
+    }
 });
 
 // ── Application Flow Controls ────────────────────────────────────────
@@ -298,6 +579,9 @@ function clearChat() {
         loadSuggestions("general");
     }
     if (DOM.scrollDownBtn) DOM.scrollDownBtn.style.display = "none";
+    try {
+        updateTrialStepper();
+    } catch (e) {}
 }
 
 function renderMessagesFromServer(messages) {
@@ -325,6 +609,9 @@ function renderMessagesFromServer(messages) {
         }
     });
     scrollToBottom();
+    try {
+        updateTrialStepper();
+    } catch (e) {}
 }
 
 function switchMode(mode, triggerNewChat = true) {
@@ -490,6 +777,26 @@ async function sendMessage() {
                 ensureAiBubble();
                 renderJudgeDecision(aiContentWrapper, judgeDecision);
             },
+            onPipelineStage(stageData) {
+                ensureAiBubble();
+                renderPipelineStages(aiContentWrapper, stageData);
+            },
+            onEntities(entities) {
+                ensureAiBubble();
+                renderEntitiesPanel(aiContentWrapper, entities);
+            },
+            onSuccessProbability(probData) {
+                ensureAiBubble();
+                renderSuccessProbability(aiContentWrapper, probData);
+            },
+            onTimeline(timelineData) {
+                ensureAiBubble();
+                renderAutoTimeline(aiContentWrapper, timelineData);
+            },
+            onFollowUps(followUps) {
+                ensureAiBubble();
+                renderFollowUpChips(aiContentWrapper, followUps);
+            },
             onToken(token) {
                 removeThinking();
                 ensureAiBubble();
@@ -634,7 +941,31 @@ async function sendDebateMessage(messageText, caseDesc) {
             appendAiMsg("خطأ: " + data.error, []);
         } else {
             if (data.session_id) debateSessionId = data.session_id;
-            appendAiMsg(data.answer, data.sources || []);
+            
+            if (data.scorecard) {
+                appendAiMsg(
+                    data.answer, 
+                    data.sources || [], 
+                    true, 
+                    null, 
+                    [], 
+                    [], 
+                    null, 
+                    null, 
+                    data.judge_decision
+                );
+                
+                const lastAiRow = DOM.chatMessages.querySelector(".ai-row:last-child .msg-content-wrapper");
+                if (lastAiRow) {
+                    renderScorecard(lastAiRow, data.scorecard);
+                }
+            } else {
+                appendAiMsg(data.answer, data.sources || []);
+            }
+            
+            try {
+                updateTrialStepper();
+            } catch (e) {}
             
             // Reload conversations list in sidebar
             Sidebar.loadConversations();
@@ -907,13 +1238,41 @@ function addActionsRow(wrapper, text) {
         <button class="msg-action-btn read-btn" title="قراءة بصوت">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
         </button>
+        <button class="msg-action-btn export-timeline-btn" title="مخطط التواريخ والتقادم">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+        </button>
+        <button class="msg-action-btn export-docx-btn" title="تصدير كملف Word (.docx)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+        </button>
+        <button class="msg-action-btn export-pdf-btn" title="طباعة وحفظ كـ PDF">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
+        </button>
         <button class="msg-action-btn regenerate-btn" title="إعادة المحاولة">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+        </button>
+        <button class="msg-action-btn simplify-btn" title="اشرحها بالعربي البسيط">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
         </button>
     `;
 
     actionsRow.querySelector(".copy-btn").onclick = () => copyToClipboard(text);
     actionsRow.querySelector(".read-btn").onclick = () => speakText(text);
+    
+    const timelineBtn = actionsRow.querySelector(".export-timeline-btn");
+    if (timelineBtn) {
+        timelineBtn.onclick = () => extractAndRenderTimeline(wrapper, text);
+    }
+    
+    const docxBtn = actionsRow.querySelector(".export-docx-btn");
+    if (docxBtn) {
+        docxBtn.onclick = () => exportToDocx("مستند قانوني Qanuni.AI", text);
+    }
+    
+    const pdfBtn = actionsRow.querySelector(".export-pdf-btn");
+    if (pdfBtn) {
+        pdfBtn.onclick = () => printToPdf("مستند قانوني Qanuni.AI", text);
+    }
+
     actionsRow.querySelector(".regenerate-btn").onclick = () => {
         const lastUserMsg = getLastUserMessageText();
         if (lastUserMsg) {
@@ -921,6 +1280,11 @@ function addActionsRow(wrapper, text) {
             sendMessage();
         }
     };
+
+    const simplifyBtn = actionsRow.querySelector(".simplify-btn");
+    if (simplifyBtn) {
+        simplifyBtn.onclick = () => explainSimple(text);
+    }
 
     wrapper.appendChild(actionsRow);
 }
@@ -1153,6 +1517,13 @@ function renderMarkdown(text) {
     html = html.replace(/\n/g, "<br>");
     html = "<p>" + html + "</p>";
     html = html.replace(/<p>\s*<\/p>/g, "");
+    
+    try {
+        html = highlightGlossary(html);
+    } catch (e) {
+        console.error("Glossary highlight error:", e);
+    }
+    
     return html;
 }
 
@@ -1272,5 +1643,654 @@ function renderJudgeDecision(wrapper, decision) {
         wrapper.insertBefore(container, actions);
     } else {
         wrapper.appendChild(container);
+    }
+}
+
+// ── Export and Formatting Helpers ──
+
+async function exportToDocx(title, content) {
+    try {
+        showToast("جاري إعداد ملف Word...");
+        const res = await fetch("/api/export/docx", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                ...Sidebar.getHeaders()
+            },
+            body: JSON.stringify({ title, content })
+        });
+        if (res.ok) {
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${title}.docx`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+            showToast("تم تحميل ملف Word بنجاح!");
+        } else {
+            const err = await res.json();
+            showToast("خطأ: " + (err.error || "فشل تصدير الملف"), true);
+        }
+    } catch (e) {
+        console.error(e);
+        showToast("فشل الاتصال بالخادم لتصدير الملف.", true);
+    }
+}
+
+function printToPdf(title, content) {
+    const printSection = document.getElementById("print-section");
+    if (!printSection) return;
+    
+    // Render the markdown content to HTML inside the print section
+    printSection.innerHTML = `
+        <h1>Qanuni.AI — ${escapeHtml(title)}</h1>
+        <div style="direction: rtl; text-align: right;">
+            ${renderMarkdown(content)}
+        </div>
+    `;
+    printSection.style.display = "block";
+    window.print();
+    printSection.style.display = "none";
+    printSection.innerHTML = "";
+}
+
+function showToast(message, isError = false) {
+    const toast = document.createElement("div");
+    toast.style.position = "fixed";
+    toast.style.bottom = "24px";
+    toast.style.left = "50%";
+    toast.style.transform = "translateX(-50%)";
+    toast.style.backgroundColor = isError ? "#ef4444" : "#10a37f";
+    toast.style.color = "#fff";
+    toast.style.padding = "8px 16px";
+    toast.style.borderRadius = "6px";
+    toast.style.fontSize = "0.85rem";
+    toast.style.zIndex = "9999";
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2500);
+}
+
+// ── Part 2 Helper Functions ───────────────────────────────────────────
+
+async function loadGlossary() {
+    try {
+        const res = await fetch("/api/glossary");
+        if (res.ok) {
+            glossaryDict = await res.json();
+        }
+    } catch (e) {
+        console.error("Failed to load glossary:", e);
+    }
+}
+
+function highlightGlossary(html) {
+    if (Object.keys(glossaryDict).length === 0) return html;
+    
+    const tempDiv = document.createElement("div");
+    tempDiv.innerHTML = html;
+    
+    function walk(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            let text = node.nodeValue;
+            let replaced = false;
+            
+            for (const term in glossaryDict) {
+                const regex = new RegExp(`(?<![أ-ي])${term}(?![أ-ي])`, 'g');
+                if (regex.test(text)) {
+                    text = text.replace(regex, `<span class="glossary-term" data-term="${term}">${term}</span>`);
+                    replaced = true;
+                }
+            }
+            
+            if (replaced) {
+                const span = document.createElement("span");
+                span.innerHTML = text;
+                node.parentNode.replaceChild(span, node);
+            }
+        } else {
+            for (let i = node.childNodes.length - 1; i >= 0; i--) {
+                walk(node.childNodes[i]);
+            }
+        }
+    }
+    
+    walk(tempDiv);
+    return tempDiv.innerHTML;
+}
+
+function updateTrialStepper() {
+    const messages = DOM.chatMessages.querySelectorAll(".message-row");
+    const msgCount = Array.from(messages).filter(m => m.classList.contains("user-row") || m.classList.contains("ai-row")).length;
+    
+    document.querySelectorAll(".step-badge").forEach(badge => {
+        badge.classList.remove("active");
+        badge.style.background = "var(--bg-input)";
+        badge.style.color = "var(--text-secondary)";
+        badge.style.opacity = "0.5";
+    });
+    
+    let activeStepId = "step-badge-1";
+    if (msgCount <= 1) {
+        activeStepId = "step-badge-1";
+    } else if (msgCount === 2) {
+        activeStepId = "step-badge-2";
+    } else if (msgCount <= 4) {
+        activeStepId = "step-badge-3";
+    } else {
+        activeStepId = "step-badge-4";
+    }
+    
+    const activeBadge = document.getElementById(activeStepId);
+    if (activeBadge) {
+        activeBadge.classList.add("active");
+        activeBadge.style.background = "var(--accent-blue)";
+        activeBadge.style.color = "#fff";
+        activeBadge.style.opacity = "1";
+    }
+}
+
+async function extractAndRenderTimeline(wrapper, text) {
+    let container = wrapper.querySelector(".timeline-analysis-container");
+    if (container) {
+        container.remove();
+        return;
+    }
+    
+    showToast("جاري استخراج التواريخ والتقادم القانوني...");
+    
+    try {
+        const res = await fetch("/api/timeline/extract", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                ...Sidebar.getHeaders()
+            },
+            body: JSON.stringify({ text })
+        });
+        
+        if (res.ok) {
+            const data = await res.json();
+            
+            container = document.createElement("div");
+            container.className = "timeline-analysis-container";
+            container.style.marginTop = "14px";
+            container.style.border = "1px solid var(--border-color)";
+            container.style.borderRadius = "var(--radius-md)";
+            container.style.overflow = "hidden";
+            container.style.direction = "rtl";
+            container.style.textAlign = "right";
+            
+            const header = document.createElement("div");
+            header.style.backgroundColor = "rgba(96, 165, 250, 0.1)";
+            header.style.color = "#60a5fa";
+            header.style.fontWeight = "700";
+            header.style.fontSize = "0.85rem";
+            header.style.padding = "8px 12px";
+            header.style.borderBottom = "1px solid var(--border-color)";
+            header.textContent = "⏱️ مخطط التواريخ ومدد التقادم القانوني";
+            container.appendChild(header);
+            
+            const body = document.createElement("div");
+            body.style.padding = "12px";
+            body.style.backgroundColor = "rgba(255, 255, 255, 0.01)";
+            
+            if (data.warnings && data.warnings.length > 0) {
+                const warningsTitle = document.createElement("div");
+                warningsTitle.style.fontSize = "0.8rem";
+                warningsTitle.style.fontWeight = "700";
+                warningsTitle.style.marginBottom = "6px";
+                warningsTitle.style.color = "#fbbf24";
+                warningsTitle.textContent = "⚠️ تنبيهات التقادم والسقوط:";
+                body.appendChild(warningsTitle);
+                
+                data.warnings.forEach(w => {
+                    const alertBox = document.createElement("div");
+                    alertBox.style.backgroundColor = "rgba(251, 191, 36, 0.06)";
+                    alertBox.style.border = "1px dashed rgba(251, 191, 36, 0.3)";
+                    alertBox.style.borderRadius = "var(--radius-sm)";
+                    alertBox.style.padding = "8px 10px";
+                    alertBox.style.marginBottom = "10px";
+                    alertBox.style.fontSize = "0.78rem";
+                    
+                    alertBox.innerHTML = `
+                        <div style="font-weight:700; color:#fbbf24;">${escapeHtml(w.type)} (${escapeHtml(w.days_remaining_or_passed)})</div>
+                        <div style="color:var(--text-secondary); margin-top:2px; line-height:1.4;">${escapeHtml(w.description)}</div>
+                    `;
+                    body.appendChild(alertBox);
+                });
+            }
+            
+            if (data.events && data.events.length > 0) {
+                const timelineTitle = document.createElement("div");
+                timelineTitle.style.fontSize = "0.8rem";
+                timelineTitle.style.fontWeight = "700";
+                timelineTitle.style.marginTop = "12px";
+                timelineTitle.style.marginBottom = "10px";
+                timelineTitle.style.color = "var(--text-primary)";
+                timelineTitle.textContent = "📅 تسلسل وقائع القضية:";
+                body.appendChild(timelineTitle);
+                
+                const timelineGrid = document.createElement("div");
+                timelineGrid.style.position = "relative";
+                timelineGrid.style.paddingRight = "16px";
+                timelineGrid.style.borderRight = "2.5px solid var(--border-color)";
+                timelineGrid.style.marginRight = "6px";
+                timelineGrid.style.display = "flex";
+                timelineGrid.style.flexDirection = "column";
+                timelineGrid.style.gap = "14px";
+                
+                data.events.forEach(ev => {
+                    const node = document.createElement("div");
+                    node.style.position = "relative";
+                    node.style.fontSize = "0.78rem";
+                    
+                    node.innerHTML = `
+                        <span style="position: absolute; right: -21.5px; top: 4px; width: 8px; height: 8px; border-radius: 50%; background-color: #60a5fa; border: 2px solid var(--bg-card);"></span>
+                        <div style="font-weight: 700; color: #60a5fa;">${escapeHtml(ev.date)}</div>
+                        <div style="font-weight: 600; margin-top: 2px; color: var(--text-primary);">${escapeHtml(ev.event)}</div>
+                        <div style="color: var(--text-secondary); font-size: 0.72rem; margin-top: 2px; line-height: 1.3;">الأثر: ${escapeHtml(ev.implication)}</div>
+                    `;
+                    timelineGrid.appendChild(node);
+                });
+                body.appendChild(timelineGrid);
+            } else {
+                const noDates = document.createElement("div");
+                noDates.style.fontSize = "0.78rem";
+                noDates.style.color = "var(--text-secondary)";
+                noDates.textContent = "لم يتم الكشف عن تواريخ محددة في هذا النص.";
+                body.appendChild(noDates);
+            }
+            
+            container.appendChild(body);
+            
+            const actionsRow = wrapper.querySelector(".msg-actions");
+            if (actionsRow) {
+                wrapper.insertBefore(container, actionsRow);
+            } else {
+                wrapper.appendChild(container);
+            }
+            
+            showToast("تم تحليل وعرض الجدول الزمني!");
+        } else {
+            const err = await res.json();
+            showToast("خطأ: " + (err.error || "فشل استخراج التواريخ"), true);
+        }
+    } catch (e) {
+        console.error(e);
+        showToast("فشل الاتصال بالخادم لتحليل التواريخ.", true);
+    }
+}
+
+function renderScorecard(wrapper, scorecard) {
+    if (!scorecard) return;
+    
+    const container = document.createElement("div");
+    container.className = "scorecard-container";
+    container.style.marginTop = "14px";
+    container.style.border = "1px solid rgba(139, 92, 246, 0.25)";
+    container.style.borderRadius = "var(--radius-md)";
+    container.style.overflow = "hidden";
+    container.style.direction = "rtl";
+    container.style.textAlign = "right";
+    
+    const header = document.createElement("div");
+    header.style.background = "linear-gradient(135deg, rgba(139, 92, 246, 0.2) 0%, rgba(99, 102, 241, 0.2) 100%)";
+    header.style.color = "#c084fc";
+    header.style.fontWeight = "800";
+    header.style.fontSize = "0.88rem";
+    header.style.padding = "10px 14px";
+    header.style.display = "flex";
+    header.style.justifyContent = "space-between";
+    header.style.alignItems = "center";
+    header.style.borderBottom = "1px solid rgba(139, 92, 246, 0.25)";
+    
+    header.innerHTML = `
+        <span>🏆 تقييم الأداء القانوني للمرافعة</span>
+        <span style="background: rgba(168, 85, 247, 0.2); border: 1px solid rgba(168, 85, 247, 0.3); padding: 2px 10px; border-radius: 12px; font-size: 0.8rem;">الدرجة: ${scorecard.score}/100</span>
+    `;
+    container.appendChild(header);
+    
+    const body = document.createElement("div");
+    body.style.padding = "14px";
+    body.style.backgroundColor = "rgba(255, 255, 255, 0.01)";
+    body.style.display = "flex";
+    body.style.flexDirection = "column";
+    body.style.gap = "12px";
+    
+    let scoreLabel = "مقبول";
+    let scoreColor = "#f59e0b";
+    if (scorecard.score >= 90) {
+        scoreLabel = "ممتاز جداً - مرافعة بليغة وثغرات مدروسة";
+        scoreColor = "#10a37f";
+    } else if (scorecard.score >= 80) {
+        scoreLabel = "جيد جداً - مرافعة قوية وأدلة متناسقة";
+        scoreColor = "#3b82f6";
+    } else if (scorecard.score >= 65) {
+        scoreLabel = "مقبول - مرافعة أساسية بحاجة لأحكام نقض إضافية";
+        scoreColor = "#fbbf24";
+    } else {
+        scoreLabel = "ضعيف - الدفوع تفتقر للربط بنصوص ومواد القانون";
+        scoreColor = "#ef4444";
+    }
+    
+    const overview = document.createElement("div");
+    overview.style.fontSize = "0.8rem";
+    overview.innerHTML = `
+        <div style="font-weight: 700; color: ${scoreColor}; font-size: 0.84rem;">التقدير: ${scoreLabel}</div>
+    `;
+    body.appendChild(overview);
+    
+    if (scorecard.strengths && scorecard.strengths.length > 0) {
+        const strengthsBlock = document.createElement("div");
+        strengthsBlock.style.fontSize = "0.8rem";
+        strengthsBlock.innerHTML = `
+            <strong style="color: #22c55e; display: block; margin-bottom: 4px;">✔ نقاط القوة:</strong>
+            <ul style="padding-right: 18px; margin: 0; line-height: 1.4; color: var(--text-secondary);">
+                ${scorecard.strengths.map(s => `<li>${escapeHtml(s)}</li>`).join("")}
+            </ul>
+        `;
+        body.appendChild(strengthsBlock);
+    }
+    
+    if (scorecard.weaknesses && scorecard.weaknesses.length > 0) {
+        const weaknessesBlock = document.createElement("div");
+        weaknessesBlock.style.fontSize = "0.8rem";
+        weaknessesBlock.innerHTML = `
+            <strong style="color: #ef4444; display: block; margin-bottom: 4px;">❌ نقاط الضعف / القصور:</strong>
+            <ul style="padding-right: 18px; margin: 0; line-height: 1.4; color: var(--text-secondary);">
+                ${scorecard.weaknesses.map(w => `<li>${escapeHtml(w)}</li>`).join("")}
+            </ul>
+        `;
+        body.appendChild(weaknessesBlock);
+    }
+    
+    if (scorecard.advice) {
+        const adviceBlock = document.createElement("div");
+        adviceBlock.style.fontSize = "0.8rem";
+        adviceBlock.innerHTML = `
+            <strong style="color: #60a5fa; display: block; margin-bottom: 4px;">💡 نصيحة للتطوير:</strong>
+            <p style="margin: 0; line-height: 1.4; color: var(--text-secondary); text-align: justify;">${escapeHtml(scorecard.advice)}</p>
+        `;
+        body.appendChild(adviceBlock);
+    }
+    
+    container.appendChild(body);
+    
+    const actions = wrapper.querySelector(".msg-actions");
+    if (actions) {
+        wrapper.insertBefore(container, actions);
+    } else {
+        wrapper.appendChild(container);
+    }
+}
+
+// ── New AI Feature Renderers ─────────────────────────────────────────
+
+/**
+ * Renders a visual reasoning pipeline indicator within a chat bubble.
+ * Shows classification → retrieval → reasoning → decision stages.
+ */
+function renderPipelineStages(wrapper, stageData) {
+    let existing = wrapper.querySelector(".pipeline-container");
+    if (existing) existing.remove();
+
+    const stages = [
+        { key: "classification", label: "التصنيف" },
+        { key: "retrieval", label: "الاسترجاع" },
+        { key: "reasoning", label: "المداولة" },
+        { key: "decision", label: "القرار" }
+    ];
+
+    // stageData can be: { stage: "retrieval", status: "active" } or full array
+    let activeIdx = -1;
+    if (typeof stageData === "object" && stageData.stage) {
+        activeIdx = stages.findIndex(s => s.key === stageData.stage);
+    }
+
+    const container = document.createElement("div");
+    container.className = "pipeline-container";
+    container.style.cssText = "position: relative; display: flex; justify-content: space-between; align-items: flex-start; margin: 12px 0; padding: 10px 16px; background: rgba(25,25,25,0.6); border: 1px solid var(--border-color); border-radius: var(--radius-sm);";
+
+    // Background line
+    const lineDiv = document.createElement("div");
+    lineDiv.className = "pipeline-line";
+    lineDiv.innerHTML = `<div class="pipeline-line-progress" style="width: ${activeIdx >= 0 ? ((activeIdx / (stages.length - 1)) * 100) : 0}%"></div>`;
+    container.appendChild(lineDiv);
+
+    stages.forEach((s, i) => {
+        const step = document.createElement("div");
+        let stepClass = "pipeline-step";
+        if (i < activeIdx) stepClass += " completed";
+        else if (i === activeIdx) stepClass += " active";
+        step.className = stepClass;
+        step.innerHTML = `
+            <div class="pipeline-circle">${i + 1}</div>
+            <div class="pipeline-label">${s.label}</div>
+        `;
+        container.appendChild(step);
+    });
+
+    const pActions = wrapper.querySelector(".msg-actions");
+    if (pActions) {
+        wrapper.insertBefore(container, pActions);
+    } else {
+        wrapper.appendChild(container);
+    }
+}
+
+/**
+ * Renders an extracted Named Entities panel (people, orgs, courts, dates, money, laws).
+ */
+function renderEntitiesPanel(wrapper, entities) {
+    if (!entities || Object.keys(entities).length === 0) return;
+    
+    let existing = wrapper.querySelector(".entities-panel");
+    if (existing) existing.remove();
+
+    const container = document.createElement("div");
+    container.className = "entities-panel";
+    container.style.cssText = "margin: 12px 0; padding: 12px; background: rgba(25,25,25,0.6); border: 1px solid var(--border-color); border-radius: var(--radius-sm); direction: rtl; text-align: right;";
+
+    const header = document.createElement("div");
+    header.style.cssText = "font-size: 0.82rem; font-weight: 700; color: #60a5fa; margin-bottom: 8px;";
+    header.textContent = "🏷️ الكيانات المستخلصة من القضية";
+    container.appendChild(header);
+
+    const typeLabels = {
+        people: { label: "أشخاص", icon: "👤", color: "#3b82f6" },
+        organizations: { label: "مؤسسات/شركات", icon: "🏢", color: "#8b5cf6" },
+        courts: { label: "محاكم", icon: "⚖️", color: "#f59e0b" },
+        dates: { label: "تواريخ", icon: "📅", color: "#10b981" },
+        money: { label: "مبالغ مالية", icon: "💰", color: "#ef4444" },
+        laws: { label: "قوانين/مواد", icon: "📜", color: "#06b6d4" }
+    };
+
+    const grid = document.createElement("div");
+    grid.style.cssText = "display: flex; flex-wrap: wrap; gap: 8px;";
+
+    for (const [type, items] of Object.entries(entities)) {
+        if (!items || items.length === 0) continue;
+        const meta = typeLabels[type] || { label: type, icon: "📌", color: "#94a3b8" };
+
+        items.forEach(item => {
+            const chip = document.createElement("span");
+            chip.style.cssText = `padding: 4px 10px; border-radius: 12px; font-size: 0.72rem; font-weight: 600; background: ${meta.color}15; border: 1px solid ${meta.color}30; color: ${meta.color}; display: inline-flex; align-items: center; gap: 4px;`;
+            const itemText = typeof item === 'string' ? item : (item.text || item.name || JSON.stringify(item));
+            chip.innerHTML = `<span>${meta.icon}</span><span>${escapeHtml(itemText)}</span>`;
+            grid.appendChild(chip);
+        });
+    }
+
+    container.appendChild(grid);
+
+    const eActions = wrapper.querySelector(".msg-actions");
+    if (eActions) {
+        wrapper.insertBefore(container, eActions);
+    } else {
+        wrapper.appendChild(container);
+    }
+}
+
+/**
+ * Renders a success probability ring/meter.
+ */
+function renderSuccessProbability(wrapper, probData) {
+    if (!probData) return;
+    
+    let existing = wrapper.querySelector(".success-prob-container");
+    if (existing) existing.remove();
+
+    const prob = typeof probData === "number" ? probData : (probData.probability || probData.score || 50);
+    const pct = Math.round(prob <= 1 ? prob * 100 : prob);
+    const reasoning = typeof probData === "object" ? (probData.reasoning || "") : "";
+
+    let color = "#ef4444";
+    let label = "ضعيف";
+    if (pct >= 70) { color = "#2ecc71"; label = "مرتفع"; }
+    else if (pct >= 40) { color = "#e67e22"; label = "متوسط"; }
+
+    const container = document.createElement("div");
+    container.className = "success-prob-container";
+    container.style.cssText = "margin: 12px 0; padding: 14px; background: rgba(25,25,25,0.6); border: 1px solid var(--border-color); border-radius: var(--radius-sm); direction: rtl; text-align: right; display: flex; align-items: center; gap: 16px;";
+
+    container.innerHTML = `
+        <div style="position: relative; width: 60px; height: 60px; flex-shrink: 0;">
+            <svg viewBox="0 0 36 36" style="width: 60px; height: 60px; transform: rotate(-90deg);">
+                <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="#3c3c3c" stroke-width="3"></path>
+                <path d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="${color}" stroke-width="3" stroke-dasharray="${pct}, 100" stroke-linecap="round"></path>
+            </svg>
+            <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: 800; color: ${color};">${pct}%</div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 4px; flex: 1;">
+            <div style="font-size: 0.85rem; font-weight: 700; color: #fff;">احتمالية النجاح المقدرة: <span style="color: ${color};">${label}</span></div>
+            ${reasoning ? `<div style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.4;">${escapeHtml(reasoning)}</div>` : ""}
+        </div>
+    `;
+
+    const sActions = wrapper.querySelector(".msg-actions");
+    if (sActions) {
+        wrapper.insertBefore(container, sActions);
+    } else {
+        wrapper.appendChild(container);
+    }
+}
+
+/**
+ * Renders an automatically generated case timeline within a chat bubble.
+ */
+function renderAutoTimeline(wrapper, timelineData) {
+    if (!timelineData || timelineData.length === 0) return;
+
+    let existing = wrapper.querySelector(".auto-timeline-container");
+    if (existing) existing.remove();
+
+    const container = document.createElement("div");
+    container.className = "auto-timeline-container";
+    container.style.cssText = "margin: 12px 0; padding: 14px; background: rgba(25,25,25,0.6); border: 1px solid var(--border-color); border-radius: var(--radius-sm); direction: rtl; text-align: right;";
+
+    const header = document.createElement("div");
+    header.style.cssText = "font-size: 0.82rem; font-weight: 700; color: #60a5fa; margin-bottom: 10px;";
+    header.textContent = "📅 الجدول الزمني للقضية (تلقائي)";
+    container.appendChild(header);
+
+    const list = document.createElement("div");
+    list.style.cssText = "display: flex; flex-direction: column; gap: 8px; padding-right: 16px; border-right: 2px solid var(--border-color); margin-right: 6px;";
+
+    timelineData.forEach(evt => {
+        const item = document.createElement("div");
+        item.style.cssText = "position: relative;";
+        
+        const date = evt.date || evt.event_date || "";
+        const title = evt.event || evt.title || "";
+        const desc = evt.implication || evt.description || "";
+        const isDeadline = evt.is_deadline;
+
+        item.innerHTML = `
+            <span style="position: absolute; right: -22px; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: ${isDeadline ? '#e74c3c' : '#60a5fa'}; border: 2px solid var(--bg-main);"></span>
+            <div style="font-weight: 700; font-size: 0.76rem; color: ${isDeadline ? '#e74c3c' : '#60a5fa'};">${escapeHtml(date)} ${isDeadline ? '⚠️' : ''}</div>
+            <div style="font-weight: 600; font-size: 0.8rem; color: #fff;">${escapeHtml(title)}</div>
+            ${desc ? `<div style="font-size: 0.72rem; color: var(--text-secondary); line-height: 1.3; margin-top: 2px;">${escapeHtml(desc)}</div>` : ""}
+        `;
+        list.appendChild(item);
+    });
+
+    container.appendChild(list);
+
+    const tActions = wrapper.querySelector(".msg-actions");
+    if (tActions) {
+        wrapper.insertBefore(container, tActions);
+    } else {
+        wrapper.appendChild(container);
+    }
+}
+
+/**
+ * Renders clickable follow-up suggestion chips.
+ */
+function renderFollowUpChips(wrapper, followUps) {
+    if (!followUps || followUps.length === 0) return;
+
+    let existing = wrapper.querySelector(".follow-up-container");
+    if (existing) existing.remove();
+
+    const container = document.createElement("div");
+    container.className = "follow-up-container";
+
+    const label = document.createElement("div");
+    label.style.cssText = "font-size: 0.72rem; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; width: 100%;";
+    label.textContent = "💡 أسئلة متابعة مقترحة:";
+    container.appendChild(label);
+
+    followUps.forEach(q => {
+        const chip = document.createElement("button");
+        chip.className = "follow-up-chip";
+        chip.textContent = typeof q === "string" ? q : (q.question || q.text || JSON.stringify(q));
+        chip.onclick = () => {
+            if (DOM.input) {
+                DOM.input.value = chip.textContent;
+                autoResize();
+                updateSendBtn();
+                sendMessage();
+            }
+        };
+        container.appendChild(chip);
+    });
+
+    const fActions = wrapper.querySelector(".msg-actions");
+    if (fActions) {
+        wrapper.insertBefore(container, fActions);
+    } else {
+        wrapper.appendChild(container);
+    }
+}
+
+/**
+ * Simplify legal text into plain Arabic via the /api/explain-simple endpoint.
+ */
+async function explainSimple(text) {
+    showToast("جاري تبسيط النص القانوني...");
+    try {
+        const res = await fetch("/api/explain-simple", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                ...Sidebar.getHeaders()
+            },
+            body: JSON.stringify({ text: text })
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            appendAiMsg(`🗣️ **شرح مبسط:**\n\n${data.simplified || data.result || "لم يتم التبسيط."}`, []);
+        } else {
+            showToast("فشل تبسيط النص القانوني.", true);
+        }
+    } catch (e) {
+        console.error(e);
+        showToast("خطأ في الاتصال بالخادم.", true);
     }
 }

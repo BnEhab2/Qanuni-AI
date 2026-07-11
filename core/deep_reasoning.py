@@ -15,6 +15,7 @@ Steps:
     8. Evidence-Based Conclusion (structured reasoning trace)
 """
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,21 @@ from config import (
     LEGAL_CATEGORIES,
     REASONING_MAX_RISK_ITEMS,
 )
+
+
+def _safe_parse_json(response_text: str, default=None):
+    """Safely extract and parse the first JSON object from an LLM response string."""
+    if not response_text:
+        return default
+    try:
+        start = response_text.find("{")
+        end = response_text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(response_text[start:end+1])
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return default
+
 
 
 # ── Data Structures ──────────────────────────────────────────────────
@@ -66,6 +82,9 @@ class ReasoningTrace:
     prosecution: dict = field(default_factory=dict)
     defense: dict = field(default_factory=dict)
     judge_decision: dict = field(default_factory=dict)
+    entities: dict = field(default_factory=dict)
+    timeline: dict = field(default_factory=dict)
+    success_probability_data: dict = field(default_factory=dict)
 
 
 # ── Cross-Reference Patterns ────────────────────────────────────────
@@ -211,8 +230,9 @@ class DeepLegalReasoner:
 
     # ── Step 1: Semantic Fact Extraction ──────────────────────────────
 
-    def extract_facts(self, user_query: str) -> dict:
+    def extract_facts(self, user_query: str, generate_fn=None) -> dict:
         """Enhanced fact extraction with patterns, not just keywords."""
+        import json
         t0 = time.time()
 
         facts = {
@@ -248,10 +268,33 @@ class DeepLegalReasoner:
         for match in re.finditer(money_pattern, user_query):
             facts["monetary_refs"].append(match.group(0))
 
-        # Article references in the query itself
-        art_pattern = r'(?:ال)?مادة\s+(?:رقم\s*)?(\d+(?:\s*مكرر)?)'
-        for match in re.finditer(art_pattern, user_query):
-            facts["article_refs"].append(match.group(1).strip())
+        # If generate_fn is provided, perform LLM-based NER extraction
+        if generate_fn:
+            try:
+                system_prompt = (
+                    "أنت خبير تحليل نصوص قانونية واستخراج كيانات قانونية. "
+                    "مهمتك استخراج الكيانات المحددة من النص المرفق بصيغة JSON مطابقة تماماً للمثال التالي دون أي نصوص إضافية أو تعليقات خارج الجيسون:\n"
+                    "{\n"
+                    '  "people": ["اسم الشخص 1"],\n'
+                    '  "organizations": ["اسم الجهة/الشركة 1"],\n'
+                    '  "dates": ["تاريخ 1"],\n'
+                    '  "money": ["مبلغ مالي 1"],\n'
+                    '  "courts": ["اسم المحكمة 1"],\n'
+                    '  "laws": ["اسم القانون/المادة 1"]\n'
+                    "}"
+                )
+                prompt = f"اقرأ النص واستخرج الكيانات المحددة:\n\n{user_query}"
+                ner_response = generate_fn(prompt, system_prompt).strip()
+                ner_data = _safe_parse_json(ner_response, {})
+                if ner_data:
+                    facts["people"] = ner_data.get("people", [])
+                    facts["organizations"] = ner_data.get("organizations", [])
+                    facts["dates"] = ner_data.get("dates", [])
+                    facts["money"] = ner_data.get("money", [])
+                    facts["courts"] = ner_data.get("courts", [])
+                    facts["laws"] = ner_data.get("laws", [])
+            except Exception as e:
+                print(f"[DeepReasoner] LLM NER failed: {e}")
 
         step = ReasoningStep(
             step_number=1,
@@ -778,7 +821,7 @@ class DeepLegalReasoner:
         self.reset()
 
         # Step 1: Facts
-        facts = self.extract_facts(user_query)
+        facts = self.extract_facts(user_query, generate_fn)
 
         # Step 2: Classification
         classification = self.classify(user_query, facts)
@@ -803,22 +846,63 @@ class DeepLegalReasoner:
         defense_data = {}
         judge_data = {}
 
+        # Heuristic check for legal signals in the user query to bypass LLM reasoning for simple greetings
+        has_legal_signals = (
+            len(facts.get("parties", [])) > 0 or
+            len(facts.get("actions", [])) > 0 or
+            len(facts.get("keywords", [])) > 0 or
+            len(facts.get("monetary_refs", [])) > 0 or
+            len(facts.get("article_refs", [])) > 0 or
+            classification.get("primary_category", "other") != "other"
+        )
+
         if generate_fn:
-            try:
-                from core.agents.prosecutor_agent import ProsecutorAgent
-                from core.agents.defense_agent import DefenseAgent
-                from core.agents.judge_agent import JudgeAgent
+            if not has_legal_signals:
+                print("[DeepReasoner] Non-legal or general query detected. Bypassing multi-agent analysis.")
+                prosecution_data = {
+                    "argument": "لا توجد أبعاد قانونية واضحة في الاستفسار المعروض تقتضي مرافعة الادعاء.",
+                    "supporting_articles": [],
+                    "confidence": 0.0,
+                    "risk_view": "low",
+                    "reasoning": "الاستفسار ذو طبيعة عامة أو غير قانونية."
+                }
+                defense_data = {
+                    "argument": "لا يوجد اتهام أو مسؤولية قانونية تقتضي تقديم دفوع.",
+                    "supporting_articles": [],
+                    "confidence": 0.0,
+                    "risk_view": "low",
+                    "reasoning": "الاستفسار ذو طبيعة عامة أو غير قانونية."
+                }
+                judge_data = {
+                    "verdict": "uncertain",
+                    "verdict_ar": "غير حاسم",
+                    "confidence": 0.0,
+                    "reasoning": "الاستفسار المقدم عام ولا يطرح نزاعاً قانونياً أو وقائع للفصل فيها.",
+                    "key_factors": ["طبيعة استرشادية عامة"]
+                }
+            else:
+                try:
+                    from core.agents.prosecutor_agent import ProsecutorAgent
+                    from core.agents.defense_agent import DefenseAgent
+                    from core.agents.judge_agent import JudgeAgent
+                    from concurrent.futures import ThreadPoolExecutor
 
-                print("[DeepReasoner] Initiating multi-agent analysis...")
-                prosecutor = ProsecutorAgent(generate_fn)
-                defense = DefenseAgent(generate_fn)
-                judge = JudgeAgent(generate_fn)
+                    print("[DeepReasoner] Initiating multi-agent analysis...")
+                    prosecutor = ProsecutorAgent(generate_fn)
+                    defense = DefenseAgent(generate_fn)
+                    judge = JudgeAgent(generate_fn)
 
-                prosecution_data = prosecutor.analyze(facts, scored_articles, contradictions)
-                defense_data = defense.analyze(facts, scored_articles, contradictions)
-                judge_data = judge.decide(facts, prosecution_data, defense_data, scored_articles, contradictions)
-            except Exception as e:
-                print(f"[DeepReasoner] Error in multi-agent execution: {e}")
+                    # Execute prosecution and defense agents concurrently in parallel threads
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        future_pros = executor.submit(prosecutor.analyze, facts, scored_articles, contradictions)
+                        future_def = executor.submit(defense.analyze, facts, scored_articles, contradictions)
+                        prosecution_data = future_pros.result()
+                        defense_data = future_def.result()
+
+                    # Judge decision must run after both prosecution and defense arguments are ready
+                    judge_data = judge.decide(facts, prosecution_data, defense_data, scored_articles, contradictions)
+                except Exception as e:
+                    print(f"[DeepReasoner] Error in multi-agent execution: {e}")
         else:
             # Fallback mock data when running offline/tests without generation
             prosecution_data = {
@@ -842,6 +926,61 @@ class DeepLegalReasoner:
                 "reasoning": "تعادل الحجج بين النيابة والدفاع يقتضي التوقف وطلب مزيد من الإيضاح.",
                 "key_factors": ["تعارض الدفوع والأدلة"]
             }
+
+        # Success probability and timeline extraction
+        success_prob_data = {
+            "probability": 50,
+            "pros": ["توفر نصوص قانونية مطابقة"],
+            "cons": ["تحتاج القضية لمزيد من التدقيق الواقعي للأدلة"],
+            "precedents": []
+        }
+        timeline_data = {"events": [], "warnings": []}
+
+        if generate_fn and has_legal_signals:
+            try:
+                system_prompt_prob = (
+                    "أنت مستشار قانوني خبير في تقييم القضايا والنزاعات أمام القضاء المصري. "
+                    "مهمتك تقييم احتمالية كسب القضية بناءً على الوقائع المرفقة وأدلة الادعاء والدفاع المتاحة. "
+                    "يجب أن تقدم تحليلاً دقيقاً وحساب نسبة مئوية واقعية للاحتمالية (من 0 إلى 100) وتوفر نقاط القوة والضعف والأدلة الداعمة. "
+                    "الرد يجب أن يكون بصيغة JSON مطابقة تماماً للهيكل التالي دون أي نصوص إضافية أو تعليقات خارج الجيسون:\n"
+                    "{\n"
+                    '  "probability": 75,\n'
+                    '  "pros": ["نقطة قوة 1"],\n'
+                    '  "cons": ["نقطة ضعف 1"],\n'
+                    '  "precedents": ["سوابق قضائية أو أحكام نقض تدعم الموقف 1"]\n'
+                    "}"
+                )
+                prompt_prob = (
+                    f"الوقائع المرفقة بالنزاع:\n{user_query}\n\n"
+                    f"حجة الادعاء:\n{json.dumps(prosecution_data, ensure_ascii=False)}\n\n"
+                    f"دفوع الدفاع:\n{json.dumps(defense_data, ensure_ascii=False)}\n"
+                )
+                prob_response = generate_fn(prompt_prob, system_prompt_prob).strip()
+                success_prob_data = _safe_parse_json(prob_response, success_prob_data)
+            except Exception as e:
+                print(f"[DeepReasoner] LLM success probability calculation failed: {e}")
+
+            try:
+                system_prompt_time = (
+                    "أنت خبير قانوني مصري متخصص في استخراج التواريخ وحساب مواعيد مدد السقوط والتقادم القانوني طبقاً لأحكام القانون المصري. "
+                    "مهمتك هي استخراج الوقائع المرتبطة بتواريخ محددة، وتقييم وجود أي مدد تقادم مسقط للحقوق أو مدد سقوط أو مواعيد إجرائية هامة. "
+                    "يجب أن يكون ردك بصيغة JSON صالحة ومطابقة للهيكل التالي تماماً ودون أي نصوص إضافية أو تعليقات خارج الجيسون:\n"
+                    "{\n"
+                    '  "events": [\n'
+                    '    { "date": "التاريخ (YYYY/MM/DD)", "event": "وصف الواقعة", "implication": "الأثر القانوني" }\n'
+                    '  ],\n'
+                    '  "warnings": [\n'
+                    '    { "type": "نوع التنبيه", "days_remaining_or_passed": "المدة المتبقية أو المنقضية", "description": "شرح السند القانوني" }\n'
+                    '  ]\n'
+                    "}"
+                )
+                prompt_time = f"اقرأ النص واستخرج التواريخ والتقادم القانوني المرتبط به بدقة:\n\n{user_query}"
+                timeline_response = generate_fn(prompt_time, system_prompt_time).strip()
+                parsed_timeline = _safe_parse_json(timeline_response, None)
+                if parsed_timeline:
+                    timeline_data = parsed_timeline
+            except Exception as e:
+                print(f"[DeepReasoner] LLM timeline extraction failed: {e}")
 
         # Step 8: Build reasoning context
         reasoning_context = self.build_reasoning_context(
@@ -883,7 +1022,17 @@ class DeepLegalReasoner:
             reasoning_context=reasoning_context,
             prosecution=prosecution_data,
             defense=defense_data,
-            judge_decision=judge_data
+            judge_decision=judge_data,
+            entities={
+                "people": facts.get("people", []),
+                "organizations": facts.get("organizations", []),
+                "dates": facts.get("dates", []),
+                "money": facts.get("money", []),
+                "courts": facts.get("courts", []),
+                "laws": facts.get("laws", [])
+            },
+            timeline=timeline_data,
+            success_probability_data=success_prob_data
         )
 
         total_ms = sum(s.duration_ms for s in self._steps)

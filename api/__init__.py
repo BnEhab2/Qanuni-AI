@@ -10,6 +10,7 @@ from api.models import init_db
 from api.auth import auth_bp
 from api.chat import chat_bp
 from api.conversations import conversations_bp
+from api.features import features_bp
 
 def create_app():
     app = Flask(__name__, template_folder="../templates", static_folder="../static")
@@ -25,6 +26,10 @@ def create_app():
     app.register_blueprint(auth_bp)
     app.register_blueprint(chat_bp)
     app.register_blueprint(conversations_bp)
+    app.register_blueprint(features_bp)
+
+    from core.observability import setup_observability
+    setup_observability(app)
 
     @app.route("/")
     def index():

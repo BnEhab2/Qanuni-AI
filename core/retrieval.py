@@ -60,6 +60,14 @@ class HybridRetriever:
         if self._embed_model is not None:
             return
 
+        try:
+            from app import get_embed_model
+            self._embed_model = get_embed_model()
+            if self._embed_model is not None:
+                return
+        except ImportError:
+            pass
+
         import torch
         torch.set_num_threads(TORCH_NUM_THREADS)
 

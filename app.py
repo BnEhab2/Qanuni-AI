@@ -19,6 +19,40 @@ if sys.platform.startswith("win"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Configure structured logging for production
+def _configure_logging():
+    log_dir = Path(__file__).parent / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "qanuni_server.log"
+    
+    # Configure root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Simple formatter for standard output and files
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # File Handler (rotating, max 10MB per file)
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=10*1024*1024, backupCount=5, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    # Stream Handler (stdout)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    
+    print(f"[Logging] Writing structured logs to: {log_file}")
+
+_configure_logging()
+
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -34,6 +68,7 @@ from config import (
     CONVERSATION_MEMORY_MAX_TURNS,
     TORCH_NUM_THREADS,
     MERGED_CORPUS_PATH,
+    USE_RERANKER,
 )
 
 # ── Download DB for HuggingFace Spaces ────────────────────────────────
@@ -88,15 +123,29 @@ _check_and_download_db()
 
 # ── Load Models ───────────────────────────────────────────────────────
 import chromadb
-from sentence_transformers import SentenceTransformer
 
-import torch
-torch.set_num_threads(TORCH_NUM_THREADS)
+_embed_model = None
+_embed_lock = threading.Lock()
 
-print(f"[*] Loading embedding model: {EMBEDDING_MODEL}")
-_embed_device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"    Target device: {_embed_device}")
-_embed_model = SentenceTransformer(EMBEDDING_MODEL, device=_embed_device)
+def get_embed_model():
+    """Thread-safe lazy loading of the embedding model singleton."""
+    global _embed_model
+    if _embed_model is None:
+        with _embed_lock:
+            if _embed_model is None:
+                import torch
+                from sentence_transformers import SentenceTransformer
+                print(f"[*] Loading embedding model: {EMBEDDING_MODEL}...")
+                _embed_device = "cuda" if torch.cuda.is_available() else "cpu"
+                print(f"    Target device for embedding model: {_embed_device}")
+                _embed_model = SentenceTransformer(EMBEDDING_MODEL, device=_embed_device)
+                
+                # Propagate to retriever and case memory
+                if '_retriever' in globals() and _retriever is not None:
+                    _retriever._embed_model = _embed_model
+                if '_case_memory' in globals() and _case_memory is not None:
+                    _case_memory.embed_model = _embed_model
+    return _embed_model
 
 print(f"[*] Connecting to ChromaDB at: {CHROMA_DB_PATH}")
 _chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
@@ -107,7 +156,7 @@ from core.retrieval import HybridRetriever, get_hybrid_retriever
 
 print("[*] Initializing Hybrid Retriever...")
 _retriever = get_hybrid_retriever(
-    embed_model=_embed_model,
+    embed_model=None,  # Loaded lazily
     chroma_client=_chroma_client,
     collection=_collection,
 )
@@ -120,23 +169,24 @@ _reranker = get_reranker()
 # Background warmup
 def _warm_up():
     try:
-        print("[Warmup] Starting...")
-        _embed_model.encode("تحميل")
+        print("[Warmup] Starting background model loading...")
+        embed = get_embed_model()
+        embed.encode("تحميل")
         _retriever._build_bm25_index()
-        _reranker._ensure_model()
-        print("[Warmup] Done!")
+        
+        if USE_RERANKER:
+            print("[Warmup] Loading reranker model in background...")
+            _reranker._ensure_model()
+            
+        print("[Warmup] All models warmed up and ready in background!")
     except Exception as e:
-        print(f"[Warmup] Error: {e}")
-
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-    threading.Thread(target=_warm_up, daemon=True).start()
+        print(f"[Warmup] Error during background model warmup: {e}")
 
 # Share embedding model with CaseMemory
 from core.memory import get_case_memory
 
 print("[*] Initializing Case Memory...")
 _case_memory = get_case_memory()
-_case_memory.embed_model = _embed_model
 
 from core.reasoning import LegalReasoningChain
 from core.deep_reasoning import DeepLegalReasoner
@@ -233,6 +283,7 @@ def search_laws(query: str, top_k: int = RERANKER_TOP_K,
                 type_filter: str | None = None,
                 category_filter: str | None = None) -> list[dict]:
     """Full retrieval pipeline: query → hybrid → rerank → results."""
+    get_embed_model()  # Ensure model is initialized
     results = tool_search_laws(
         query=query,
         retriever=_retriever,
@@ -585,6 +636,13 @@ init_chat_services(
     confidence_scorer=_confidence_scorer,
     generate_text_fn=generate_text,
 )
+
+# Start background warmup thread to load models asynchronously without blocking Flask.
+# In debug mode, only run inside the reloader's child process (WERKZEUG_RUN_MAIN=true).
+# In production (non-debug) mode, run immediately.
+is_debug = (os.environ.get("FLASK_DEBUG") == "1") or (__name__ == "__main__")
+if (is_debug and os.environ.get("WERKZEUG_RUN_MAIN") == "true") or not is_debug:
+    threading.Thread(target=_warm_up, daemon=True).start()
 
 
 @app.route("/api/case-memory/<int:case_id>", methods=["GET"])

@@ -11,7 +11,7 @@ const Streaming = {
      * Supports cancellation via AbortController.
      */
     async stream(url, payload, headers, callbacks) {
-        const { onSources, onToken, onDone, onError, onClassification, onConfidence, onContradictions, onRisks, onProsecution, onDefense, onJudgeDecision } = callbacks;
+        const { onSources, onToken, onDone, onError, onClassification, onConfidence, onContradictions, onRisks, onProsecution, onDefense, onJudgeDecision, onPipelineStage, onEntities, onSuccessProbability, onTimeline, onFollowUps } = callbacks;
         
         try {
             const response = await fetch(url, {
@@ -58,7 +58,7 @@ const Streaming = {
                         const jsonStr = eventText.slice(5).trim();
                         try {
                             const eventData = JSON.parse(jsonStr);
-                            this.processEvent(eventData, { onSources, onToken, onDone, onClassification, onConfidence, onContradictions, onRisks, onProsecution, onDefense, onJudgeDecision, onError });
+                            this.processEvent(eventData, { onSources, onToken, onDone, onClassification, onConfidence, onContradictions, onRisks, onProsecution, onDefense, onJudgeDecision, onPipelineStage, onEntities, onSuccessProbability, onTimeline, onFollowUps, onError });
                         } catch (e) {
                             console.warn("[Streaming] Failed to parse JSON event:", e, jsonStr);
                         }
@@ -100,6 +100,21 @@ const Streaming = {
                 break;
             case "judge_decision":
                 if (callbacks.onJudgeDecision) callbacks.onJudgeDecision(event.data);
+                break;
+            case "pipeline_stage":
+                if (callbacks.onPipelineStage) callbacks.onPipelineStage(event.data);
+                break;
+            case "entities":
+                if (callbacks.onEntities) callbacks.onEntities(event.data);
+                break;
+            case "success_probability":
+                if (callbacks.onSuccessProbability) callbacks.onSuccessProbability(event.data);
+                break;
+            case "timeline":
+                if (callbacks.onTimeline) callbacks.onTimeline(event.data);
+                break;
+            case "follow_ups":
+                if (callbacks.onFollowUps) callbacks.onFollowUps(event.data);
                 break;
             case "token":
                 if (callbacks.onToken) callbacks.onToken(event.data);

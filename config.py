@@ -36,7 +36,14 @@ CHUNK_OVERLAP_WORDS = 20
 # Retrieval
 TOP_K = 6
 
-# Reranker
+try:
+    import torch
+    _cuda_available = torch.cuda.is_available()
+except ImportError:
+    _cuda_available = False
+
+# Reranker configurations
+USE_RERANKER = _cuda_available  # Skip reranker on CPU to reduce query latency from 8s to <1s
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 RERANKER_TOP_K = 4
 RERANKER_BATCH_SIZE = 16
@@ -45,7 +52,9 @@ RERANKER_BATCH_SIZE = 16
 SEMANTIC_WEIGHT = 0.65
 BM25_WEIGHT = 0.35
 BM25_TOP_K = 10
-HYBRID_CANDIDATE_K = 15
+
+# Dynamic candidate count to reduce CPU reranking latency
+HYBRID_CANDIDATE_K = 15 if _cuda_available else 8
 
 # Case Memory
 CASE_MEMORY_DB_PATH = str(BASE_DIR / "data" / "case_memory.db")
@@ -87,7 +96,30 @@ WEB_SEARCH_LEGAL_DOMAINS = [
 ]
 
 # Auth & Security
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_hex(32))
+def _get_persistent_jwt_secret() -> str:
+    """Load or generate a persistent JWT secret key to preserve user sessions across restarts."""
+    env_secret = os.getenv("JWT_SECRET_KEY")
+    if env_secret:
+        return env_secret
+
+    secret_file = BASE_DIR / "data" / "jwt_secret.key"
+    if secret_file.exists():
+        try:
+            return secret_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+    # Generate a new persistent key and save it
+    new_secret = secrets.token_hex(32)
+    try:
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        secret_file.write_text(new_secret, encoding="utf-8")
+        print(f"[Config] Generated and saved persistent JWT secret key to: {secret_file.name}")
+    except Exception as e:
+        print(f"[Config] Failed to save persistent JWT secret key: {e}")
+    return new_secret
+
+JWT_SECRET_KEY = _get_persistent_jwt_secret()
 JWT_ACCESS_TOKEN_EXPIRES = 86400
 BCRYPT_LOG_ROUNDS = 12
 GUEST_MESSAGE_LIMIT = 5

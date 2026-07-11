@@ -13,6 +13,10 @@
     
     <!-- Link to external stylesheet -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    
+    <!-- External charting and graph libraries for CMS Dashboard -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
 
@@ -25,6 +29,22 @@
             <button class="new-chat-btn" id="new-chat-btn">
                 <span>محادثة جديدة</span>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:16px; height:16px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            </button>
+            <button class="new-chat-btn draft-doc-btn" id="draft-doc-btn" style="background-color: var(--bg-bubble-user); border: 1px solid var(--border-color); color: var(--text-primary); margin-top: 8px;">
+                <span>صياغة مستند قانوني</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px; height:14px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+            </button>
+        </div>
+        
+        <!-- CMS Sidebar Navigation Links -->
+        <div class="sidebar-nav" style="padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border-color);">
+            <button class="nav-item active" id="nav-chat-btn" style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); border: none; background: var(--bg-bubble-user); color: #fff; text-align: right; width: 100%; cursor: pointer; font-family: inherit; font-size: 0.88rem; font-weight: 500;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px; height:16px;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                <span>المستشار الذكي</span>
+            </button>
+            <button class="nav-item" id="nav-dashboard-btn" style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); border: none; background: transparent; color: var(--text-secondary); text-align: right; width: 100%; cursor: pointer; font-family: inherit; font-size: 0.88rem; font-weight: 500; transition: all 0.2s;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px; height:16px;"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><line x1="15" y1="3" x2="15" y2="21"></line><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line></svg>
+                <span>لوحة القضايا والتحليلات</span>
             </button>
         </div>
         
@@ -46,7 +66,7 @@
         </div>
     </aside>
 
-    <!-- ── Main Chat Window ── -->
+    <!-- ── Main Window ── -->
     <main class="main">
         
         <header class="topbar-header">
@@ -77,15 +97,29 @@
 
         <!-- Debate role banner -->
         <div class="debate-banner" id="debate-banner">
-            <div class="debate-banner-content">
-                <span class="debate-banner-label">دورك في المناظرة:</span>
-                <div class="role-selector-segmented">
-                    <button class="role-segment-btn defense active" data-role="defense">دفاع</button>
-                    <button class="role-segment-btn prosecution" data-role="prosecution">ادعاء</button>
+            <div class="debate-banner-content" style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span class="debate-banner-label">دورك في المناظرة:</span>
+                    <div class="role-selector-segmented">
+                        <button class="role-segment-btn defense active" data-role="defense">دفاع</button>
+                        <button class="role-segment-btn prosecution" data-role="prosecution">ادعاء</button>
+                    </div>
+                </div>
+                
+                <!-- Trial Stepper -->
+                <div class="debate-stepper" id="debate-stepper" style="display: flex; align-items: center; gap: 6px; direction: rtl; font-size: 0.72rem; font-weight: 700; color: var(--text-secondary);">
+                    <span class="step-badge active" id="step-badge-1" style="background: var(--accent-blue); padding: 2px 10px; border-radius: 12px; color: #fff;">1. القضية</span>
+                    <span style="color: var(--border-color); font-size:0.6rem;">←</span>
+                    <span class="step-badge" id="step-badge-2" style="background: var(--bg-input); border: 1px solid var(--border-color); padding: 2px 10px; border-radius: 12px; opacity: 0.5;">2. الافتتاحية</span>
+                    <span style="color: var(--border-color); font-size:0.6rem;">←</span>
+                    <span class="step-badge" id="step-badge-3" style="background: var(--bg-input); border: 1px solid var(--border-color); padding: 2px 10px; border-radius: 12px; opacity: 0.5;">3. التعقيب الختامي</span>
+                    <span style="color: var(--border-color); font-size:0.6rem;">←</span>
+                    <span class="step-badge" id="step-badge-4" style="background: var(--bg-input); border: 1px solid var(--border-color); padding: 2px 10px; border-radius: 12px; opacity: 0.5;">⚖️ حكم المنصة</span>
                 </div>
             </div>
         </div>
 
+        <!-- ── Chat Assistant View ── -->
         <div class="chat-container" id="chat-container">
             <div class="chat-messages" id="chat-messages">
 
@@ -195,6 +229,83 @@
             </div>
         </div>
 
+        <!-- ── Lawyer Dashboard Container (CMS) ── -->
+        <div class="dashboard-container" id="dashboard-container" style="display: none; flex-direction: column; flex: 1; overflow-y: auto; padding: 24px; direction: rtl; text-align: right; gap: 24px; background-color: var(--bg-main);">
+            
+            <!-- Analytics Cards Row -->
+            <div class="analytics-row" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                <div class="analytics-card" style="padding: 16px; background: rgba(25, 25, 25, 0.95); border: 1px solid var(--border-color); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 8px;">
+                    <div style="font-size: 0.78rem; color: var(--text-secondary);">إجمالي القضايا</div>
+                    <div id="stats-total-cases" style="font-size: 1.8rem; font-weight: 700; color: #fff;">0</div>
+                </div>
+                <div class="analytics-card" style="padding: 16px; background: rgba(25, 25, 25, 0.95); border: 1px solid var(--border-color); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 8px;">
+                    <div style="font-size: 0.78rem; color: var(--text-secondary);">القضايا النشطة</div>
+                    <div id="stats-active-cases" style="font-size: 1.8rem; font-weight: 700; color: var(--accent-blue);">0</div>
+                </div>
+                <div class="analytics-card" style="padding: 16px; background: rgba(25, 25, 25, 0.95); border: 1px solid var(--border-color); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 8px;">
+                    <div style="font-size: 0.78rem; color: var(--text-secondary);">القضايا المغلقة</div>
+                    <div id="stats-closed-cases" style="font-size: 1.8rem; font-weight: 700; color: #2ecc71;">0</div>
+                </div>
+                <div class="analytics-card" style="padding: 16px; background: rgba(25, 25, 25, 0.95); border: 1px solid var(--border-color); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 8px;">
+                    <div style="font-size: 0.78rem; color: var(--text-secondary);">متوسط نسبة النجاح المقدرة</div>
+                    <div id="stats-avg-prob" style="font-size: 1.8rem; font-weight: 700; color: #e67e22;">0%</div>
+                </div>
+            </div>
+
+            <!-- Double Column layout -->
+            <div class="dashboard-grid" style="display: grid; grid-template-columns: 1fr 1.6fr; gap: 20px; align-items: start;">
+                
+                <!-- Left Column (Deadlines, Charts) -->
+                <div class="left-col" style="display: flex; flex-direction: column; gap: 20px;">
+                    
+                    <!-- Calendar Deadlines -->
+                    <div class="dashboard-widget" style="padding: 20px; background: rgba(25, 25, 25, 0.95); border: 1px solid var(--border-color); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 14px;">
+                        <h3 style="font-size: 0.95rem; font-weight: 700; color: #fff; margin-bottom: 4px; display: flex; align-items: center; gap: 8px;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px; color: #e74c3c;"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                            <span>المواعيد والآجال القادمة</span>
+                        </h3>
+                        <div id="upcoming-deadlines-list" style="display: flex; flex-direction: column; gap: 10px; max-height: 250px; overflow-y: auto;">
+                            <div style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 12px;">لا توجد مواعيد نشطة حالياً.</div>
+                        </div>
+                    </div>
+
+                    <!-- Category Chart -->
+                    <div class="dashboard-widget" style="padding: 20px; background: rgba(25, 25, 25, 0.95); border: 1px solid var(--border-color); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 14px;">
+                        <h3 style="font-size: 0.95rem; font-weight: 700; color: #fff; margin-bottom: 4px;">توزيع القضايا حسب التصنيف</h3>
+                        <div style="height: 180px; position: relative;">
+                            <canvas id="categoryChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Column (CMS Cases list) -->
+                <div class="right-col" style="padding: 20px; background: rgba(25, 25, 25, 0.95); border: 1px solid var(--border-color); border-radius: var(--radius-md); display: flex; flex-direction: column; gap: 16px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 14px;">
+                        <h3 style="font-size: 1.05rem; font-weight: 700; color: #fff;">إدارة ملفات القضايا</h3>
+                        <button class="new-chat-btn" id="create-new-case-btn" style="width: auto; padding: 6px 14px; font-size: 0.82rem; margin: 0; background-color: var(--accent-blue);">إضافة قضية جديدة</button>
+                    </div>
+
+                    <!-- Filter / Search Row -->
+                    <div style="display: flex; gap: 10px;">
+                        <input type="text" id="cms-search-input" placeholder="بحث باسم الموكل أو رقم القضية..." style="flex: 1; padding: 8px 12px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: #fff; font-family: inherit; font-size: 0.82rem; outline: none;">
+                        <select id="cms-status-filter" style="padding: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: #fff; font-family: inherit; font-size: 0.82rem;">
+                            <option value="">جميع الحالات</option>
+                            <option value="active">نشطة</option>
+                            <option value="pending">معلقة</option>
+                            <option value="closed">مغلقة</option>
+                        </select>
+                    </div>
+
+                    <!-- Cases Grid List -->
+                    <div id="cms-cases-list" style="display: grid; grid-template-columns: 1fr; gap: 12px; max-height: 480px; overflow-y: auto;">
+                        <!-- Dynamically populated -->
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+
         <button class="scroll-down-btn" id="scroll-down-btn" title="النزول للأسفل">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
@@ -203,6 +314,13 @@
             <div class="input-wrapper" id="input-wrapper">
                 <textarea id="user-input" rows="1" placeholder="اسأل عن أي شيء قانوني..." autocomplete="off"></textarea>
                 <div class="input-right-buttons">
+                    <button class="file-upload-btn" id="mic-btn" title="إدخال صوتي باللغة العربية" style="width: 32px; height: 32px; border-radius: 50%; border: 1.5px solid var(--border-color); background: transparent; color: var(--text-muted); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s ease; margin-left: 6px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px; height:16px;"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                    </button>
+                    <button class="file-upload-btn" id="file-upload-btn" title="تحميل وتحليل مستند (PDF / DOCX)" style="width: 32px; height: 32px; border-radius: 50%; border: 1.5px solid var(--border-color); background: transparent; color: var(--text-muted); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s ease;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px; height:16px;"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                    </button>
+                    <input type="file" id="file-upload-input" accept=".pdf,.docx" style="display:none;">
                     <button class="web-search-toggle" id="web-search-toggle" title="تفعيل البحث على الإنترنت">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
                         <span class="toggle-dot"></span>
@@ -261,11 +379,325 @@
     </div>
 </div>
 
+<!-- ── Drafting Assistant Modal ── -->
+<div class="auth-modal-overlay" id="draft-modal">
+    <div class="auth-modal" style="max-width: 500px; background: rgba(23, 23, 23, 0.98); border-radius: var(--radius-lg); border: 1.5px solid var(--border-color);">
+        <button class="auth-close-btn" id="draft-close-btn" style="font-size: 1.5rem;">&times;</button>
+        <h2 style="font-size: 1.25rem; margin-bottom: 20px; color: #fff; text-align: center; font-weight: 700; border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">مساعد الصياغة القانونية</h2>
+        <form id="draft-form" style="display: flex; flex-direction: column; gap: 14px; direction: rtl;">
+            <div class="form-group">
+                <label style="font-size: 0.85rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px;">نوع المستند المطلوب</label>
+                <select id="draft-template-type" style="padding: 10px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: #fff; outline: none; font-family: inherit; font-size: 0.9rem;">
+                    <option value="contract">صياغة عقد متكامل (بيع، إيجار، عمل...)</option>
+                    <option value="memo">صياغة مذكرة دفاع موجهة للمحكمة</option>
+                    <option value="petition">صياغة صحيفة دعوى رسمية</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label style="font-size: 0.85rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px;">تفاصيل ومضمون القضية / البنود الأساسية</label>
+                <textarea id="draft-case-details" placeholder="مثال: بيع شقة سكنية في المعادي بين أحمد ومحمد بقيمة مليون جنيه..." required style="padding: 10px; min-height: 100px; max-height: 200px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: #fff; resize: none; font-family: inherit; font-size: 0.9rem; line-height: 1.5; outline: none;"></textarea>
+            </div>
+            <div class="form-group">
+                <label style="font-size: 0.85rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px;">شروط أو تعليمات إضافية (اختياري)</label>
+                <input type="text" id="draft-custom-instructions" placeholder="مثال: إضافة بند جزائي للتأخير، تحديد المحكمة المختصة..." style="padding: 10px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: #fff; font-family: inherit; font-size: 0.9rem; outline: none;">
+            </div>
+            <button type="submit" class="auth-submit-btn" style="background-color: var(--accent-blue); margin-top: 10px; padding: 12px; font-weight: 700;">ابدأ الصياغة بالذكاء الاصطناعي</button>
+        </form>
+    </div>
+</div>
+
+<!-- ── Citation Viewer Modal ── -->
+<div class="auth-modal-overlay" id="citation-modal">
+    <div class="auth-modal" style="max-width: 600px; background: rgba(18, 18, 18, 0.98); border-radius: var(--radius-lg); border: 1.5px solid var(--border-color);">
+        <button class="auth-close-btn" id="citation-close-btn" style="font-size: 1.5rem;">&times;</button>
+        <h2 id="citation-modal-title" style="font-size: 1.2rem; color: #fff; text-align: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 16px; font-weight: 700;">المادة القانونية</h2>
+        <div id="citation-modal-content" style="max-height: 350px; overflow-y: auto; font-size: 0.95rem; line-height: 1.6; color: var(--text-primary); padding: 12px; border-radius: var(--radius-sm); background: var(--bg-bubble-assistant); direction: rtl; text-align: justify; margin-bottom: 16px;">
+            <!-- Snippet highlighted here -->
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border-color); padding-top: 12px;">
+            <span id="citation-modal-meta" style="font-size: 0.78rem; color: var(--text-secondary);"></span>
+            <a id="citation-modal-link" href="#" target="_blank" style="font-size: 0.85rem; color: var(--accent-blue); text-decoration: none; font-weight: 600; display: flex; align-items: center; gap: 4px;">
+                <span>المصدر الأصلي (منشورات)</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px; height:14px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+            </a>
+        </div>
+    </div>
+</div>
+
+<!-- ── Case Details Inspection Modal ── -->
+<div class="auth-modal-overlay" id="case-details-modal">
+    <div class="auth-modal" style="max-width: 800px; background: rgba(18, 18, 18, 0.98); border-radius: var(--radius-lg); border: 1.5px solid var(--border-color); width: 90%; max-height: 85vh; overflow-y: auto; direction: rtl; text-align: right; padding: 24px;">
+        <button class="auth-close-btn" id="case-details-close-btn" style="font-size: 1.5rem;">&times;</button>
+        <h2 id="case-detail-title" style="font-size: 1.3rem; color: #fff; font-weight: 700; margin-bottom: 4px;">تفاصيل القضية</h2>
+        <span id="case-detail-subtitle" style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 16px; display: block;"></span>
+        
+        <!-- Case Details Meta Section -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; padding: 14px; background: rgba(25, 25, 25, 0.6); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 20px;">
+            <div><strong style="color: var(--text-secondary); font-size: 0.78rem;">الموكل:</strong> <span id="case-detail-client" style="color: #fff; font-size: 0.85rem;"></span></div>
+            <div><strong style="color: var(--text-secondary); font-size: 0.78rem;">رقم القضية:</strong> <span id="case-detail-number" style="color: #fff; font-size: 0.85rem;"></span></div>
+            <div><strong style="color: var(--text-secondary); font-size: 0.78rem;">المحكمة:</strong> <span id="case-detail-court" style="color: #fff; font-size: 0.85rem;"></span></div>
+            <div><strong style="color: var(--text-secondary); font-size: 0.78rem;">التصنيف:</strong> <span id="case-detail-category" style="color: #fff; font-size: 0.85rem;"></span></div>
+            <div><strong style="color: var(--text-secondary); font-size: 0.78rem;">احتمالية النجاح:</strong> <span id="case-detail-prob" style="font-weight: 700; font-size: 0.85rem;"></span></div>
+            <div><strong style="color: var(--text-secondary); font-size: 0.78rem;">الحالة:</strong> 
+                <select id="case-detail-status-select" style="background: var(--bg-input); border: 1px solid var(--border-color); color: #fff; font-size: 0.8rem; padding: 2px 6px; border-radius: 4px;">
+                    <option value="active">نشطة</option>
+                    <option value="pending">معلقة</option>
+                    <option value="closed">مغلقة</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Visual reasoning pipeline for this case -->
+        <div style="margin-bottom: 24px; padding: 14px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: rgba(25, 25, 25, 0.4);">
+            <h4 style="font-size: 0.88rem; font-weight: 700; color: #fff; margin-bottom: 10px;">مسار التحليل البصري الاستنتاجي (Pipeline)</h4>
+            <div id="case-detail-pipeline" style="display: flex; justify-content: space-between; align-items: center; position: relative;">
+                <!-- Dynamically drawn dots: Classification -> Retrieval -> Reasoning -> Decision -->
+            </div>
+        </div>
+
+        <!-- Case Tabs Header -->
+        <div class="auth-tabs" style="margin-bottom: 16px; border-bottom: 1px solid var(--border-color);">
+            <button class="auth-tab active" data-case-tab="notes">الملاحظات</button>
+            <button class="auth-tab" data-case-tab="attachments">المستندات والمرفقات</button>
+            <button class="auth-tab" data-case-tab="timeline">الجدول الزمني والآجال</button>
+            <button class="auth-tab" data-case-tab="judgment">الحكم والادعاءات</button>
+            <button class="auth-tab" data-case-tab="graph">شجرة العلاقات التفاعلية</button>
+        </div>
+
+        <!-- Case Tabs Content -->
+        <!-- Notes Tab -->
+        <div class="case-tab-content active" id="case-tab-notes">
+            <div style="display: flex; flex-direction: column; gap: 14px;">
+                <div style="display: flex; gap: 10px;">
+                    <textarea id="case-note-new-input" placeholder="اكتب ملاحظة قانونية جديدة هنا..." style="flex: 1; min-height: 50px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: #fff; padding: 8px 10px; font-family: inherit; font-size: 0.85rem; outline: none;"></textarea>
+                    <button class="new-chat-btn" id="case-note-submit-btn" style="width: auto; padding: 8px 20px; margin: 0; background-color: var(--accent-blue);">إضافة</button>
+                </div>
+                <div id="case-notes-list" style="display: flex; flex-direction: column; gap: 10px; max-height: 250px; overflow-y: auto; padding-left: 4px;">
+                    <!-- Notes loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Attachments Tab -->
+        <div class="case-tab-content" id="case-tab-attachments" style="display: none;">
+            <div style="display: flex; flex-direction: column; gap: 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(25,25,25,0.4); padding: 12px; border: 1px dashed var(--border-color); border-radius: var(--radius-sm);">
+                    <span style="font-size: 0.8rem; color: var(--text-secondary);">ارفع ملف قضية (PDF / DOCX) لتشغيل التحليل التلقائي وتغذية الجدول الزمني وتوقع الحكم!</span>
+                    <button class="new-chat-btn" id="case-upload-btn" style="width: auto; padding: 6px 14px; margin: 0; background-color: var(--accent-blue);">ارفع مستند</button>
+                    <input type="file" id="case-upload-input" accept=".pdf,.docx" style="display: none;">
+                </div>
+                <div id="case-attachments-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto;">
+                    <!-- Attachments loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Timeline Tab -->
+        <div class="case-tab-content" id="case-tab-timeline" style="display: none;">
+            <div style="display: flex; flex-direction: column; gap: 14px;">
+                <div style="display: grid; grid-template-columns: 1fr 2fr 1fr auto; gap: 10px; align-items: end;">
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label style="font-size:0.75rem; color: var(--text-secondary);">التاريخ</label>
+                        <input type="text" id="case-timeline-new-date" placeholder="مثال: 2026/08/10" style="padding: 6px 10px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color:#fff; font-family: inherit; font-size:0.8rem; outline: none; width: 100%;">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label style="font-size:0.75rem; color: var(--text-secondary);">الواقعة / الحدث</label>
+                        <input type="text" id="case-timeline-new-title" placeholder="أدخل وصف الحدث أو الجلسة..." style="padding: 6px 10px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color:#fff; font-family: inherit; font-size:0.8rem; outline: none; width: 100%;">
+                    </div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label style="font-size:0.75rem; color: var(--text-secondary);">الموعد النهائي؟</label>
+                        <select id="case-timeline-new-deadline" style="padding: 6px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color:#fff; font-family: inherit; font-size:0.8rem; outline: none; width: 100%;">
+                            <option value="0">جلسة/واقعة عادية</option>
+                            <option value="1">أجل نهائي / سقوط</option>
+                        </select>
+                    </div>
+                    <button class="new-chat-btn" id="case-timeline-submit-btn" style="width: auto; padding: 6px 14px; margin: 0; background-color: var(--accent-blue); height: 32px;">إضافة</button>
+                </div>
+                <div id="case-timeline-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto;">
+                    <!-- Timeline items loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Judgment expectations Tab -->
+        <div class="case-tab-content" id="case-tab-judgment" style="display: none;">
+            <div style="display: flex; flex-direction: column; gap: 14px;">
+                <div id="case-judgment-container" style="display: flex; flex-direction: column; gap: 14px;">
+                    <!-- Populate Prosecution, Defense summaries & Verdict expectations -->
+                    <div style="padding:12px; background: rgba(25,25,25,0.4); border: 1px solid var(--border-color); border-radius:var(--radius-sm); font-size: 0.85rem; color: var(--text-secondary); text-align: center;">ارفع ملف قضية في علامة التبويب "المرفقات" أو استشر الذكاء الاصطناعي لتوليد توقعات الحكم.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Graph Tab -->
+        <div class="case-tab-content" id="case-tab-graph" style="display: none;">
+            <div style="display: flex; flex-direction: column; gap: 14px;">
+                <div style="font-size: 0.78rem; color: var(--text-secondary);">شجرة تفاعلية تعرض الكيانات المستخلصة (الأشخاص، الشركات، المحاكم) والروابط بينها وبين المواد القانونية المطبقة في القضية:</div>
+                <div id="case-relationship-graph" style="height: 300px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: rgba(18,18,18,0.9); position: relative;">
+                    <!-- Vis.js Graph canvas -->
+                </div>
+            </div>
+        </div>
+        
+        <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border-color); padding-top: 16px; margin-top: 20px;">
+            <button class="new-chat-btn" id="case-delete-btn" style="width: auto; padding: 8px 16px; margin: 0; background-color: #e74c3c;">حذف القضية</button>
+            <button class="new-chat-btn" id="case-draft-doc-btn" style="width: auto; padding: 8px 16px; margin: 0; background-color: var(--accent-blue);">صياغة مستند لهذه القضية</button>
+        </div>
+    </div>
+</div>
+
+<!-- ── Add Case Modal ── -->
+<div class="auth-modal-overlay" id="add-case-modal">
+    <div class="auth-modal" style="max-width: 500px; background: rgba(18, 18, 18, 0.98); border-radius: var(--radius-lg); border: 1.5px solid var(--border-color); direction: rtl; text-align: right; padding: 24px;">
+        <button class="auth-close-btn" id="add-case-close-btn" style="font-size: 1.5rem;">&times;</button>
+        <h2 style="font-size: 1.2rem; color: #fff; font-weight: 700; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; text-align: center;">إضافة قضية جديدة</h2>
+        <form id="add-case-form" style="display: flex; flex-direction: column; gap: 12px;">
+            <div class="form-group">
+                <label>عنوان القضية</label>
+                <input type="text" id="add-case-title" placeholder="مثال: نزاع عقد بيع شقة المعادي" required style="padding: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 4px; color: #fff; font-family: inherit; font-size: 0.85rem; outline: none;">
+            </div>
+            <div class="form-group">
+                <label>اسم الموكل</label>
+                <input type="text" id="add-case-client" placeholder="أدخل اسم الموكل..." required style="padding: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 4px; color: #fff; font-family: inherit; font-size: 0.85rem; outline: none;">
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <div class="form-group">
+                    <label>رقم القضية</label>
+                    <input type="text" id="add-case-number" placeholder="رقم / لسنة" style="padding: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 4px; color: #fff; font-family: inherit; font-size: 0.85rem; outline: none; width: 100%;">
+                </div>
+                <div class="form-group">
+                    <label>المحكمة المختصة</label>
+                    <input type="text" id="add-case-court" placeholder="مثال: محكمة المعادي الجزئية" style="padding: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 4px; color: #fff; font-family: inherit; font-size: 0.85rem; outline: none; width: 100%;">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>التصنيف القانوني</label>
+                <select id="add-case-category" style="padding: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 4px; color: #fff; font-family: inherit; font-size: 0.85rem;">
+                    <option value="civil_law">القانون المدني</option>
+                    <option value="criminal_law">القانون الجنائي</option>
+                    <option value="commercial_law">القانون التجاري</option>
+                    <option value="family_law">قانون الأحوال الشخصية</option>
+                    <option value="labor_law">قانون العمل</option>
+                    <option value="real_estate_law">قانون العقارات</option>
+                    <option value="administrative_law">القانون الإداري</option>
+                    <option value="tax_law">قانون الضرائب</option>
+                    <option value="other">أخرى</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>الوصف والوقائع</label>
+                <textarea id="add-case-description" placeholder="اكتب الوقائع الأساسية والادعاءات هنا..." style="padding: 8px; min-height: 80px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 4px; color: #fff; font-family: inherit; font-size: 0.85rem; outline: none; resize: none;"></textarea>
+            </div>
+            <button type="submit" class="auth-submit-btn" style="background-color: var(--accent-blue); padding: 10px; font-weight: 700; margin-top: 10px;">إنشاء ملف القضية</button>
+        </form>
+    </div>
+</div>
+
+<!-- Print Layout stylesheet and section -->
+<style>
+    @media print {
+        body * {
+            visibility: hidden !important;
+        }
+        #print-section, #print-section * {
+            visibility: visible !important;
+        }
+        #print-section {
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 100% !important;
+            direction: rtl !important;
+            text-align: right !important;
+            color: #000 !important;
+            background: #fff !important;
+            font-family: 'Arial', sans-serif !important;
+            font-size: 14pt !important;
+            line-height: 1.6 !important;
+            padding: 40px !important;
+            margin: 0 !important;
+        }
+        #print-section h1 {
+            font-size: 22pt !important;
+            text-align: center !important;
+            margin-bottom: 30px !important;
+            border-bottom: 2px solid #000 !important;
+            padding-bottom: 10px !important;
+        }
+        #print-section h2 {
+            font-size: 18pt !important;
+            margin-top: 25px !important;
+            margin-bottom: 15px !important;
+            border-bottom: 1px solid #000 !important;
+            padding-bottom: 5px !important;
+        }
+        #print-section h3 {
+            font-size: 14pt !important;
+            margin-top: 20px !important;
+            margin-bottom: 10px !important;
+        }
+        #print-section p {
+            margin-bottom: 15px !important;
+            text-align: justify !important;
+        }
+        #print-section ul, #print-section ol {
+            padding-right: 25px !important;
+            margin-bottom: 15px !important;
+        }
+        #print-section li {
+            margin-bottom: 8px !important;
+        }
+    }
+</style>
+<div id="print-section" style="display: none;"></div>
+
+<!-- Glossary Tooltip Styling & Markup -->
+<style>
+    .glossary-term {
+        border-bottom: 1.5px dotted var(--accent-blue) !important;
+        cursor: help !important;
+        font-weight: 600 !important;
+        color: #60a5fa !important;
+        transition: all 0.2s ease !important;
+        display: inline-block !important;
+    }
+    .glossary-term:hover {
+        color: #93c5fd !important;
+        background-color: rgba(96, 165, 250, 0.08) !important;
+        border-bottom-style: solid !important;
+    }
+    .glossary-tooltip {
+        position: absolute;
+        background: rgba(18, 18, 18, 0.95) !important;
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid var(--border-color) !important;
+        border-radius: var(--radius-sm) !important;
+        padding: 10px 14px !important;
+        color: #fff !important;
+        font-size: 0.8rem !important;
+        max-width: 260px !important;
+        line-height: 1.5 !important;
+        direction: rtl !important;
+        text-align: right !important;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5) !important;
+        transition: opacity 0.15s ease !important;
+        opacity: 0;
+        pointer-events: none;
+        z-index: 10000;
+    }
+    .glossary-tooltip.visible {
+        opacity: 1;
+    }
+</style>
+<div id="glossary-tooltip" class="glossary-tooltip"></div>
+
 <!-- Import application logic modules -->
 <script src="{{ url_for('static', filename='js/auth.js') }}"></script>
 <script src="{{ url_for('static', filename='js/sidebar.js') }}"></script>
 <script src="{{ url_for('static', filename='js/streaming.js') }}"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 
 </body>
 </html>

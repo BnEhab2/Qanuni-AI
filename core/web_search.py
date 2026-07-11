@@ -17,30 +17,16 @@ from config import (
 )
 
 # Simple TTL cache
-_cache: dict[str, tuple[float, str]] = {}
-_cache_lock = threading.Lock()
-
+from core.caching import cache
 
 def _get_cached(key: str) -> Optional[str]:
     """Return cached result if still valid."""
-    with _cache_lock:
-        if key in _cache:
-            ts, result = _cache[key]
-            if time.time() - ts < WEB_SEARCH_CACHE_TTL:
-                return result
-            del _cache[key]
-    return None
+    return cache.get(f"qanuni:web:{key}")
 
 
 def _set_cache(key: str, result: str):
     """Store result in cache."""
-    with _cache_lock:
-        _cache[key] = (time.time(), result)
-        if len(_cache) > 80:
-            # Evict oldest 20% to keep cache bounded
-            sorted_keys = sorted(_cache, key=lambda k: _cache[k][0])
-            for k in sorted_keys[:len(sorted_keys) // 5]:
-                del _cache[k]
+    cache.set(f"qanuni:web:{key}", result, ttl=WEB_SEARCH_CACHE_TTL)
 
 
 def _extract_search_keywords(query: str) -> str:

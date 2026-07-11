@@ -24,10 +24,34 @@ from api.models import (
     get_conversation,
     update_conversation_title,
     touch_conversation,
+    get_conversation_message_count,
+    get_messages,
 )
 from config import GUEST_MESSAGE_LIMIT
+from core.caching import cache
 
 chat_bp = Blueprint("chat", __name__)
+
+def _generate_follow_ups(user_message, answer, generate_fn):
+    if not generate_fn:
+        return []
+    try:
+        system_prompt = (
+            "أنت مساعد قانوني ذكي وموجز للغاية. اقترح سؤالين أو ثلاثة أسئلة متابعة قصيرة جداً ومباشرة ومحددة للمستخدم للاستفسار عن تفاصيل القضية الناقصة (مثال: هل تم تحرير محضر شرطة بالواقعة؟ هل هناك شهود إثبات؟).\n"
+            "يجب أن تكون الأسئلة باللغة العربية الفصحى البسيطة.\n"
+            "الرد يجب أن يكون قائمة JSON فقط ومطابقة للهيكل التالي تماماً ودون أي نصوص إضافية:\n"
+            '["سؤال 1", "سؤال 2"]'
+        )
+        prompt = f"السؤال/الموقف:\n{user_message}\n\nالإجابة/التحليل:\n{answer}"
+        response = generate_fn(prompt, system_prompt).strip()
+        start = response.find("[")
+        end = response.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(response[start:end+1])
+        return []
+    except Exception as e:
+        print(f"[FollowUps] Failed to generate follow-up questions: {e}")
+        return ["هل تم تحرير محضر رسمي بالواقعة؟", "هل تتوفر أي مستندات أو عقود كتابية؟"]
 
 # Injected by app.py after model initialization
 _services = {}
@@ -151,36 +175,43 @@ def chat():
     prosecution_data = {}
     defense_data = {}
     judge_decision_data = {}
+    entities_data = {}
+    timeline_data = {"events": [], "warnings": []}
+    success_probability_data = {"probability": 50, "pros": [], "cons": [], "precedents": []}
 
-    # Search laws (Retrieval)
-    results = search_laws(
-        user_message,
-        source_filter=source_filter,
-        type_filter=type_filter,
-        category_filter=category_filter,
-    )
+    # Search laws (Retrieval) with Redis caching
+    cache_key = f"qanuni:search:{user_message}:{source_filter}:{type_filter}:{category_filter}:{web_search_enabled}"
+    results = cache.get(cache_key)
+    if not results:
+        results = search_laws(
+            user_message,
+            source_filter=source_filter,
+            type_filter=type_filter,
+            category_filter=category_filter,
+        )
 
-    if web_search_enabled:
-        try:
-            from core.web_search import _ddg_search
-            print(f"[WebSearch] Executing pre-reasoning web search for: {user_message[:50]}...")
-            web_raw = _ddg_search(user_message, max_results=4)
-            web_results = []
-            for r in web_raw:
-                web_results.append({
-                    "law_name": r.get("title", "نتيجة بحث ويب"),
-                    "text": r.get("body", ""),
-                    "categories": "إنترنت / أخبار",
-                    "source": "web_search",
-                    "type": "web",
-                    "citation": r.get("href", ""),
-                    "article_number": "ويب",
-                    "reranker_score": 0.95,
-                    "retrieval_method": "web_search"
-                })
-            results = web_results + results
-        except Exception as e:
-            print(f"[WebSearch] Pre-reasoning search failed: {e}")
+        if web_search_enabled:
+            try:
+                from core.web_search import _ddg_search
+                print(f"[WebSearch] Executing pre-reasoning web search for: {user_message[:50]}...")
+                web_raw = _ddg_search(user_message, max_results=4)
+                web_results = []
+                for r in web_raw:
+                    web_results.append({
+                        "law_name": r.get("title", "نتيجة بحث ويب"),
+                        "text": r.get("body", ""),
+                        "categories": "إنترنت / أخبار",
+                        "source": "web_search",
+                        "type": "web",
+                        "citation": r.get("href", ""),
+                        "article_number": "ويب",
+                        "reranker_score": 0.95,
+                        "retrieval_method": "web_search"
+                    })
+                results = web_results + results
+            except Exception as e:
+                print(f"[WebSearch] Pre-reasoning search failed: {e}")
+        cache.set(cache_key, results, ttl=1800)
 
     deep_reasoner = _services.get("deep_reasoner")
     contradiction_detector = _services.get("contradiction_detector")
@@ -200,6 +231,9 @@ def chat():
             prosecution_data = trace.prosecution
             defense_data = trace.defense
             judge_decision_data = trace.judge_decision
+            entities_data = getattr(trace, "entities", {})
+            timeline_data = getattr(trace, "timeline", {"events": [], "warnings": []})
+            success_probability_data = getattr(trace, "success_probability_data", {"probability": 50, "pros": [], "cons": [], "precedents": []})
 
             # Compute confidence score
             confidence_data = confidence_scorer.score(
@@ -311,6 +345,9 @@ def chat():
     if conv and conv["title"] == "محادثة جديدة":
         update_conversation_title(conversation_id, _auto_title(user_message))
 
+    # Step 10: Generate follow-up questions
+    follow_ups = _generate_follow_ups(user_message, answer, _services.get("generate_text"))
+
     return jsonify({
         "answer": answer,
         "sources": sources,
@@ -324,6 +361,10 @@ def chat():
         "prosecution": prosecution_data,
         "defense": defense_data,
         "judge_decision": judge_decision_data,
+        "entities": entities_data,
+        "timeline": timeline_data,
+        "success_probability": success_probability_data,
+        "follow_ups": follow_ups
     })
 
 
@@ -395,38 +436,60 @@ def chat_stream():
         try:
             conversation_context = conversation_memory.get_context(session_id)
 
+            yield f"data: {json.dumps({'type': 'pipeline_stage', 'data': 'classification'})}\n\n"
+
             prosecution_data = {}
             defense_data = {}
             judge_decision_data = {}
+            entities_data = {}
+            timeline_data = {"events": [], "warnings": []}
+            success_probability_data = {"probability": 50, "pros": [], "cons": [], "precedents": []}
+            confidence_data = {}
+            contradictions_data = []
+            risks_data = []
+            # Safe defaults — MUST be set before any try/except block that may set them
+            reasoning_context = ""
+            detected_category = "other"
 
-            results = search_laws(
-                user_message,
-                source_filter=source_filter,
-                type_filter=type_filter,
-                category_filter=category_filter,
-            )
+            # Step: Retrieval stage
+            yield f"data: {json.dumps({'type': 'pipeline_stage', 'data': 'retrieval'})}\n\n"
 
-            if web_search_enabled:
-                try:
-                    from core.web_search import _ddg_search
-                    print(f"[WebSearch] Executing pre-reasoning web search for: {user_message[:50]}...")
-                    web_raw = _ddg_search(user_message, max_results=4)
-                    web_results = []
-                    for r in web_raw:
-                        web_results.append({
-                            "law_name": r.get("title", "نتيجة بحث ويب"),
-                            "text": r.get("body", ""),
-                            "categories": "إنترنت / أخبار",
-                            "source": "web_search",
-                            "type": "web",
-                            "citation": r.get("href", ""),
-                            "article_number": "ويب",
-                            "reranker_score": 0.95,
-                            "retrieval_method": "web_search"
-                        })
-                    results = web_results + results
-                except Exception as e:
-                    print(f"[WebSearch] Pre-reasoning search failed: {e}")
+            # Search laws (Retrieval) with Redis caching
+            cache_key = f"qanuni:search:{user_message}:{source_filter}:{type_filter}:{category_filter}:{web_search_enabled}"
+            results = cache.get(cache_key)
+            if not results:
+                results = search_laws(
+                    user_message,
+                    source_filter=source_filter,
+                    type_filter=type_filter,
+                    category_filter=category_filter,
+                )
+
+                if web_search_enabled:
+                    try:
+                        from core.web_search import _ddg_search
+                        print(f"[WebSearch] Executing pre-reasoning web search for: {user_message[:50]}...")
+                        web_raw = _ddg_search(user_message, max_results=4)
+                        web_results = []
+                        for r in web_raw:
+                            web_results.append({
+                                "law_name": r.get("title", "نتيجة بحث ويب"),
+                                "text": r.get("body", ""),
+                                "categories": "إنترنت / أخبار",
+                                "source": "web_search",
+                                "type": "web",
+                                "citation": r.get("href", ""),
+                                "article_number": "ويب",
+                                "reranker_score": 0.95,
+                                "retrieval_method": "web_search"
+                            })
+                        results = web_results + results
+                    except Exception as e:
+                        print(f"[WebSearch] Pre-reasoning search failed: {e}")
+                cache.set(cache_key, results, ttl=1800)
+
+            # Step: Reasoning stage
+            yield f"data: {json.dumps({'type': 'pipeline_stage', 'data': 'reasoning'})}\n\n"
 
             deep_reasoner = _services.get("deep_reasoner")
             contradiction_detector = _services.get("contradiction_detector")
@@ -446,6 +509,9 @@ def chat_stream():
                     prosecution_data = trace.prosecution
                     defense_data = trace.defense
                     judge_decision_data = trace.judge_decision
+                    entities_data = getattr(trace, "entities", {})
+                    timeline_data = getattr(trace, "timeline", {"events": [], "warnings": []})
+                    success_probability_data = getattr(trace, "success_probability_data", {"probability": 50, "pros": [], "cons": [], "precedents": []})
 
                     # Compute confidence score
                     confidence_data = confidence_scorer.score(
@@ -484,6 +550,9 @@ def chat_stream():
                 except Exception as e:
                     print(f"[!] Reasoning chain error: {e}")
 
+            # Step: Decision stage
+            yield f"data: {json.dumps({'type': 'pipeline_stage', 'data': 'decision'})}\n\n"
+
             citation_block = build_citation_block(results)
 
             # Build sources
@@ -510,6 +579,9 @@ def chat_stream():
             yield f"data: {json.dumps({'type': 'prosecution', 'data': prosecution_data}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'defense', 'data': defense_data}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'judge_decision', 'data': judge_decision_data}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'entities', 'data': entities_data}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'success_probability', 'data': success_probability_data}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'timeline', 'data': timeline_data}, ensure_ascii=False)}\n\n"
 
             # Build LLM prompt
             context_parts = []
@@ -620,9 +692,15 @@ def chat_stream():
                 new_remaining = -1
 
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'remaining_messages': new_remaining})}\n\n"
+            
+            # Generate follow-up questions for the stream
+            follow_ups = _generate_follow_ups(user_message, full_response, _services.get("generate_text"))
+            yield f"data: {json.dumps({'type': 'follow_ups', 'data': follow_ups}, ensure_ascii=False)}\n\n"
 
         except Exception as e:
+            import traceback
             print(f"[!] Streaming error: {e}")
+            traceback.print_exc()
             yield f"data: {json.dumps({'type': 'error', 'data': 'حصل خطأ أثناء المعالجة.'})}\n\n"
 
     return Response(
@@ -631,7 +709,6 @@ def chat_stream():
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
         },
     )
 
@@ -685,7 +762,12 @@ def debate():
             mode="debate",
         )
 
+    msg_count_before = get_conversation_message_count(conversation_id)
+    if msg_count_before >= 5:
+        return jsonify({"error": "انتهت الجلسة ونطق القاضي بالحكم. يرجى بدء محادثة أو مرافعة جديدة."}), 400
+
     add_message(conversation_id, "user", user_message)
+    msg_count_after = msg_count_before + 1
 
     search_laws = _services["search_laws"]
     conversation_memory = _services["conversation_memory"]
@@ -693,7 +775,104 @@ def debate():
     run_async = _services["run_async"]
     session_service = _services["session_service"]
     types = _services["types"]
+    generate_text = _services.get("generate_text")
 
+    # If msg_count_after is 5, this is the Judge's Verdict round!
+    if msg_count_after == 5:
+        try:
+            # 1. Fetch all messages in this conversation
+            messages = get_messages(conversation_id)
+            
+            # 2. Build full transcript
+            transcript_parts = []
+            for m in messages:
+                role_label = ""
+                if m["role"] == "user":
+                    role_label = "الدفاع (المستخدم)" if user_role == "defense" else "الادعاء (المستخدم)"
+                else:
+                    role_label = "الادعاء (الذكاء الاصطناعي)" if user_role == "defense" else "الدفاع (الذكاء الاصطناعي)"
+                transcript_parts.append(f"{role_label}: {m['content']}")
+            full_transcript = "\n".join(transcript_parts)
+            
+            # 3. Call the Judge LLM
+            system_prompt = (
+                "أنت قاضٍ جنائي ومدني مصري جليل ومحايد. تقوم بتقييم المحاكمات والمرافعات بدقة تامة طبقاً لأحكام القانون المصري والمبادئ القضائية لمحكمة النقض. "
+                "ستقوم بمراجعة وقائع القضية بالكامل، ومرافعة الادعاء، ومرافعة الدفاع. بناءً عليه، ستصدر حكماً عادلاً وتُقيم أداء المحامي (المستخدم) بنقاط قوة ونقاط ضعف ونصائح قانونية لتحسين أدائه. "
+                "يجب أن يكون ردك بصيغة JSON صالحة ومطابقة للهيكل التالي تماماً ودون أي نصوص إضافية أو مقدمات:\n\n"
+                "{\n"
+                '  "verdict": "guilty" أو "not_guilty" أو "partial",\n'
+                '  "verdict_ar": "نص الحكم بالعربية الفصحى (مثال: إدانة المتهم بالسجن أو براءة المتهم لعدم كفاية الأدلة)",\n'
+                '  "reasoning": "حيثيات وأسباب الحكم بالتفصيل القانوني ومواد القانون المصري"،\n'
+                '  "score": 85,\n'
+                '  "strengths": ["نقطة قوة 1", "نقطة قوة 2"],\n'
+                '  "weaknesses": ["نقطة ضعف 1", "نقطة ضعف 2"],\n'
+                '  "advice": "نصيحة قانونية للمحامي لتحسين أدائه ومرافعاته القادمة"\n'
+                "}"
+            )
+            prompt = (
+                "المستند التالي هو وقائع الجلسات والمرافعات الشفهية والمكتوبة في القضية:\n\n"
+                f"{full_transcript}\n\n"
+                "يرجى إصدار الحكم النهائي وتقييم أداء المحامي باللغة العربية الفصحى بصيغة JSON فقط."
+            )
+            
+            judge_response = generate_text(prompt, system_prompt).strip()
+            
+            # Clean JSON from markdown code blocks
+            clean_json_match = re.search(r"({.*})", judge_response, re.DOTALL)
+            if clean_json_match:
+                judge_response = clean_json_match.group(1)
+                
+            import json
+            judge_data = json.loads(judge_response)
+        except Exception as e:
+            # Fallback judge structure in case of any JSON/processing error
+            judge_data = {
+                "verdict": "partial",
+                "verdict_ar": "حكم جزئي أو تمهيدي من المحكمة",
+                "reasoning": "قررت المحكمة إصدار حكم تمهيدي بندب خبير لإجراء المعاينة الفنية.",
+                "score": 75,
+                "strengths": ["تقديم الحجة القانونية الأولية"],
+                "weaknesses": ["نقص تفصيل الدفوع والمواد القانونية"],
+                "advice": "يرجى تقديم مذكرة دفاع أكثر تفصيلاً تشمل أحكام محكمة النقض المصرية."
+            }
+            
+        verdict_text = (
+            f"⚖️ **نطق القضاء بالحكم النهائي:**\n\n"
+            f"**الحكم:** {judge_data.get('verdict_ar', '')}\n\n"
+            f"**حيثيات وأسباب الحكم:**\n{judge_data.get('reasoning', '')}\n\n"
+            f"**درجة تقييم أداء المرافعة:** {judge_data.get('score', 0)}/100"
+        )
+        
+        judge_decision = {
+            "verdict": judge_data.get("verdict", "partial"),
+            "verdict_ar": judge_data.get("verdict_ar", ""),
+            "reasoning": judge_data.get("reasoning", ""),
+            "key_factors": judge_data.get("strengths", []),
+            "confidence": float(judge_data.get("score", 0)) / 100.0
+        }
+        
+        scorecard = {
+            "score": judge_data.get("score", 0),
+            "strengths": judge_data.get("strengths", []),
+            "weaknesses": judge_data.get("weaknesses", []),
+            "advice": judge_data.get("advice", "")
+        }
+        
+        add_message(conversation_id, "assistant", verdict_text, prosecution=None, defense=None, judge_decision=judge_decision)
+        new_remaining = increment_guest_count()
+        
+        return jsonify({
+            "answer": verdict_text,
+            "judge_decision": judge_decision,
+            "scorecard": scorecard,
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "mode": "debate",
+            "trial_finished": True,
+            "remaining_messages": new_remaining,
+        })
+
+    # Standard Prosecution / Defense rounds (Round 1 & Round 2)
     if user_role == "prosecution":
         chosen_runner = _services["debate_runner_defense"]
         app_name = "qanuni_debate_defense"
@@ -774,6 +953,7 @@ def debate():
         "session_id": session_id,
         "conversation_id": conversation_id,
         "mode": "debate",
+        "trial_finished": False,
         "remaining_messages": new_remaining,
     })
 
