@@ -497,6 +497,167 @@ class DeepLegalReasoner:
             "connections": connections,
         }
 
+    # ── Variable Completeness Check ──────────────────────────────────
+
+    def detect_missing_variables(self, user_query: str, facts: dict, classification: dict) -> dict | None:
+        """
+        Check if the query is missing critical variables needed for a specific legal answer.
+        Returns the first missing variable as a dict, or None if complete.
+
+        Return shape: {
+            "variable_key": str,       # internal key
+            "question_ar": str,        # Arabic question to ask the user
+            "options_ar": list[str],   # valid Arabic options
+        }
+        """
+        category = classification.get("primary_category", "other")
+        q = user_query
+
+        # ── Building Violations (check BEFORE real estate to avoid "عقار" false trigger) ──
+        if any(kw in q for kw in ["مخالفة بناء", "مخالفات بناء", "مخالفات في البناء", "ترخيص بناء", "إزالة بناء", "مخالفة\u0020"]):
+            has_violation_type = any(kw in q for kw in [
+                "ارتداد", "ارتفاع", "بدون ترخيص", "تغيير الاستخدام", "زراعية", "إضافات"
+            ])
+            if not has_violation_type:
+                return {
+                    "variable_key": "building_violation_type",
+                    "question_ar": "ما طبيعة مخالفة البناء؟",
+                    "options_ar": [
+                        "تعدٍ على الارتداد",
+                        "زيادة في الارتفاع",
+                        "بناء بدون ترخيص",
+                        "تغيير في الاستخدام",
+                        "بناء على أرض زراعية",
+                        "إضافات غير مرخصة",
+                    ],
+                }
+
+        # ── Real Estate / Rent ────────────────────────────────────────
+        if category in ("civil_law", "real_estate_law") or any(
+            kw in q for kw in ["شقة", "عقار", "أرض", "إيجار", "مستأجر", "مؤجر", "عقد إيجار"]
+        ):
+            # م١: purpose
+            has_purpose = any(kw in q for kw in [
+                "إيجار", "مستأجر", "مؤجر", "بيع", "شراء", "تمليك", "رهن", "هبة", "توارث", "ميراث"
+            ])
+            if not has_purpose:
+                return {
+                    "variable_key": "real_estate_purpose",
+                    "question_ar": "لتحديد حقوقك بدقة — ما الغرض من السؤال؟",
+                    "options_ar": ["إيجار", "تمليك (بيع/شراء)", "رهن", "هبة", "توارث"],
+                }
+
+            # م٢ (if rent): usage type
+            if any(kw in q for kw in ["إيجار", "مستأجر", "مؤجر"]):
+                has_usage = any(kw in q for kw in ["سكني", "تجاري", "إداري", "مسكن", "محل", "شقة سكنية"])
+                if not has_usage:
+                    return {
+                        "variable_key": "rent_usage_type",
+                        "question_ar": "ما نوع استخدام العقار؟",
+                        "options_ar": ["سكني", "تجاري", "إداري"],
+                    }
+
+                # م٣ (if rent): contract date era
+                has_date_hint = any(kw in q for kw in [
+                    "1996", "1977", "49", "قديم", "جديد", "قبل", "بعد",
+                    "قانون قديم", "قانون جديد",
+                ]) or bool(facts.get("dates"))
+                if not has_date_hint:
+                    return {
+                        "variable_key": "rent_contract_era",
+                        "question_ar": "متى أُبرم عقد الإيجار؟ (هذا يحدد القانون المنطبق)",
+                        "options_ar": ["قبل 1996 (قانون 49/1977)", "1996 أو بعدها (قانون 4/1996)"],
+                    }
+
+        # ── Family Law ────────────────────────────────────────────────
+        if category == "family_law" or any(kw in q for kw in ["طلاق", "زواج", "نفقة", "حضانة", "خلع", "ميراث"]):
+            # م١: request type
+            has_request_type = any(kw in q for kw in [
+                "طلاق", "خلع", "تطليق", "فسخ", "نفقة", "حضانة", "مهر", "قائمة", "ولاية", "ميراث"
+            ])
+            if not has_request_type:
+                return {
+                    "variable_key": "family_request_type",
+                    "question_ar": "ما طبيعة الطلب القانوني بالتحديد؟",
+                    "options_ar": ["طلاق", "خلع", "تطليق قضائي", "نفقة", "حضانة", "ميراث", "إثبات زواج"],
+                }
+
+            # م٢ (if divorce/khul'): reason
+            if any(kw in q for kw in ["طلاق", "خلع", "تطليق"]):
+                has_reason = any(kw in q for kw in [
+                    "ضرر", "غياب", "حبس", "عيب", "نفقة", "خلع", "إرادة", "مؤنة", "منفردة"
+                ])
+                if not has_reason:
+                    return {
+                        "variable_key": "divorce_reason",
+                        "question_ar": "ما سبب الطلاق أو التطليق المقصود؟",
+                        "options_ar": [
+                            "إرادة الزوج المنفردة",
+                            "طلاق للضرر والشقاق (م6)",
+                            "طلاق للغياب (م12)",
+                            "طلاق للحبس (م14)",
+                            "طلاق للعيب (م9)",
+                            "خلع (ق1/2000)",
+                        ],
+                    }
+
+        # ── Labor Law ─────────────────────────────────────────────────
+        # Use multi-word triggers to avoid substring false-positives:
+        # "أجر" is inside "مستأجر", "عمل" is inside "معاملة"/"استعمال", etc.
+        _LABOR_KW = [
+            "عقد عمل", "صاحب العمل", "العامل ", "الموظف", "فصل من العمل",
+            "فصل تعسفي", "أجر العامل", "راتب", "مكافأة نهاية الخدمة",
+            "تأمينات اجتماعية", "إجازة سنوية", "بيئة العمل",
+        ]
+        if category == "labor_law" or any(kw in q for kw in _LABOR_KW):
+            has_contract_type = any(kw in q for kw in ["محدد المدة", "غير محدد", "موسمي", "جزئي"])
+            if not has_contract_type:
+                return {
+                    "variable_key": "labor_contract_type",
+                    "question_ar": "ما نوع عقد العمل؟",
+                    "options_ar": ["محدد المدة", "غير محدد المدة", "عمل موسمي", "عمل جزئي"],
+                }
+
+            has_termination_reason = any(kw in q for kw in [
+                "فصل من العمل", "فصل تعسفي", "استقالة", "انتهاء مدة", "وفاة", "عجز", "إنهاء الخدمة"
+            ])
+            if not has_termination_reason:
+                return {
+                    "variable_key": "labor_termination_reason",
+                    "question_ar": "ما سبب إنهاء الخدمة؟",
+                    "options_ar": ["فصل من صاحب العمل", "استقالة", "انتهاء مدة العقد", "وفاة", "عجز"],
+                }
+
+        # ── Cheque / Commercial Paper ──────────────────────────────────
+        if any(kw in q for kw in ["شيك", "كمبيالة", "سند إذني", "إيصال أمانة"]):
+            has_paper_type = any(kw in q for kw in ["شيك", "كمبيالة", "سند", "إيصال"])
+            if not has_paper_type:
+                return {
+                    "variable_key": "commercial_paper_type",
+                    "question_ar": "ما نوع الورقة التجارية؟",
+                    "options_ar": ["شيك", "كمبيالة", "سند إذني", "إيصال أمانة"],
+                }
+            if "شيك" in q:
+                has_bank_submission = any(kw in q for kw in ["قُدِّم", "قدمته", "البنك", "الرصيد", "بدون رصيد"])
+                if not has_bank_submission:
+                    return {
+                        "variable_key": "cheque_bank_status",
+                        "question_ar": "هل تم تقديم الشيك للبنك؟",
+                        "options_ar": ["نعم — في المدة القانونية (6 أشهر)", "نعم — بعد انتهاء المدة", "لا"],
+                    }
+
+        # ── Inheritance ───────────────────────────────────────────────
+        if any(kw in q for kw in ["ميراث", "وصية", "تركة", "وارث", "ورثة"]):
+            has_religion = any(kw in q for kw in ["مسلم", "مسيحي", "يهودي", "مسلمون", "مسيحيون"])
+            if not has_religion:
+                return {
+                    "variable_key": "inheritance_religion",
+                    "question_ar": "ما الوضع الديني للمتوفى؟ (يحدد القانون المنطبق)",
+                    "options_ar": ["مسلم", "مسيحي", "يهودي"],
+                }
+
+        return None  # all variables present — proceed with full pipeline
+
     # ── Step 5: Contradiction Detection (delegated) ──────────────────
 
     def detect_contradictions(self, articles: list[dict], contradiction_detector) -> list[dict]:

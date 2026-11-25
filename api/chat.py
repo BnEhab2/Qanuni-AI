@@ -8,6 +8,8 @@ import uuid
 import inspect
 import asyncio
 import threading
+import queue
+import re
 
 from flask import Blueprint, request, jsonify, g, Response, stream_with_context
 
@@ -32,26 +34,21 @@ from core.caching import cache
 
 chat_bp = Blueprint("chat", __name__)
 
-def _generate_follow_ups(user_message, answer, generate_fn):
-    if not generate_fn:
-        return []
-    try:
-        system_prompt = (
-            "أنت مساعد قانوني ذكي وموجز للغاية. اقترح سؤالين أو ثلاثة أسئلة متابعة قصيرة جداً ومباشرة ومحددة للمستخدم للاستفسار عن تفاصيل القضية الناقصة (مثال: هل تم تحرير محضر شرطة بالواقعة؟ هل هناك شهود إثبات؟).\n"
-            "يجب أن تكون الأسئلة باللغة العربية الفصحى البسيطة.\n"
-            "الرد يجب أن يكون قائمة JSON فقط ومطابقة للهيكل التالي تماماً ودون أي نصوص إضافية:\n"
-            '["سؤال 1", "سؤال 2"]'
-        )
-        prompt = f"السؤال/الموقف:\n{user_message}\n\nالإجابة/التحليل:\n{answer}"
-        response = generate_fn(prompt, system_prompt).strip()
-        start = response.find("[")
-        end = response.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(response[start:end+1])
-        return []
-    except Exception as e:
-        print(f"[FollowUps] Failed to generate follow-up questions: {e}")
-        return ["هل تم تحرير محضر رسمي بالواقعة؟", "هل تتوفر أي مستندات أو عقود كتابية؟"]
+_CATEGORY_FOLLOW_UPS = {
+    "civil_law": ["هل يتوفر عقد كتابي موثق بين الطرفين؟", "هل تم توجيه أي إنذار رسمي على يد محضر؟"],
+    "real_estate_law": ["ما تاريخ إبرام عقد الإيجار بالتحديد؟", "هل العقار مخصص لغرض سكني أم تجاري؟"],
+    "family_law": ["هل صدرت أي أحكام قضائية سابقة بالنفقات؟", "هل توجد قائمة منقولات زوجية موقعة؟"],
+    "labor_law": ["هل عقد العمل محدد المدة أم غير محدد؟", "هل تم تقديم شكوى رسمية إلى مكتب العمل المختص؟"],
+    "criminal_law": ["هل تم تحرير محضر رسمي في قسم الشرطة؟", "هل تتوفر تقارير طبية أو شهود للواقعة؟"],
+    "commercial_law": ["هل تم تقديم الشيك للبنك في موعده القانوني؟", "هل تم استلام إفادة رفض بنكية بالرجوع؟"],
+}
+
+def _get_fast_follow_ups(category: str = "other", user_message: str = "") -> list[str]:
+    """Instant heuristic follow-up questions (0ms latency, no extra LLM call)."""
+    return _CATEGORY_FOLLOW_UPS.get(category, [
+        "هل يتوفر أي مستند كتابي أو عقد رسمي يخص الواقعة؟",
+        "هل اتخذت أي إجراء قانوني أو محضر رسمي حتى الآن؟"
+    ])
 
 # Injected by app.py after model initialization
 _services = {}
@@ -75,6 +72,7 @@ def init_chat_services(
     contradiction_detector,
     confidence_scorer,
     generate_text_fn=None,
+    event_loop=None,
 ):
     """Inject initialized services from app.py."""
     _services["search_laws"] = search_laws_fn
@@ -94,6 +92,7 @@ def init_chat_services(
     _services["contradiction_detector"] = contradiction_detector
     _services["confidence_scorer"] = confidence_scorer
     _services["generate_text"] = generate_text_fn
+    _services["event_loop"] = event_loop
 
 
 def _auto_title(text: str) -> str:
@@ -223,7 +222,7 @@ def chat():
                 user_message,
                 results,
                 contradiction_detector,
-                generate_fn=_services.get("generate_text")
+                generate_fn=None  # Fast deterministic reasoning (<10ms)
             )
             reasoning_context = trace.reasoning_context
             detected_category = trace.primary_category
@@ -345,8 +344,8 @@ def chat():
     if conv and conv["title"] == "محادثة جديدة":
         update_conversation_title(conversation_id, _auto_title(user_message))
 
-    # Step 10: Generate follow-up questions
-    follow_ups = _generate_follow_ups(user_message, answer, _services.get("generate_text"))
+    # Step 10: Generate fast follow-up questions
+    follow_ups = _get_fast_follow_ups(detected_category, user_message)
 
     return jsonify({
         "answer": answer,
@@ -451,6 +450,24 @@ def chat_stream():
             reasoning_context = ""
             detected_category = "other"
 
+            # ── Variable completeness check (before retrieval) ────────
+            deep_reasoner = _services.get("deep_reasoner")
+            if deep_reasoner:
+                try:
+                    # Quick classify + fact extract to detect missing variables
+                    _pre_facts = deep_reasoner.extract_facts(user_message)
+                    _pre_cls   = deep_reasoner.classify(user_message, _pre_facts)
+                    missing    = deep_reasoner.detect_missing_variables(user_message, _pre_facts, _pre_cls)
+                    if missing:
+                        opts = " | ".join(missing["options_ar"])
+                        clarification = f"{missing['question_ar']}\n({opts})"
+                        yield f"data: {json.dumps({'type': 'token', 'data': clarification}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'remaining_messages': -1})}\n\n"
+                        return
+                except Exception as e:
+                    print(f"[!] Pre-check variable detection error: {e}")
+            # ─────────────────────────────────────────────────────────
+
             # Step: Retrieval stage
             yield f"data: {json.dumps({'type': 'pipeline_stage', 'data': 'retrieval'})}\n\n"
 
@@ -501,7 +518,7 @@ def chat_stream():
                         user_message,
                         results,
                         contradiction_detector,
-                        generate_fn=_services.get("generate_text")
+                        generate_fn=None  # Fast deterministic reasoning (<10ms)
                     )
                     reasoning_context = trace.reasoning_context
                     detected_category = trace.primary_category
@@ -623,39 +640,57 @@ def chat_stream():
             else:
                 prompt = f"{context_block}\n\n### User Question:\n{user_message}"
 
-            # Stream from agent
-            async def _stream_agent():
-                uid = "default_user"
-                sid = str(uuid.uuid4())
-                sess_result = session_service.create_session(
-                    app_name="qanuni", user_id=uid, session_id=sid,
-                )
-                if inspect.iscoroutine(sess_result):
-                    session = await sess_result
-                else:
-                    session = sess_result
+            # True real-time token streaming from agent via queue bridge
+            token_queue = queue.Queue()
+            ev_loop = _services.get("event_loop")
 
-                content = types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=prompt)],
-                )
+            async def _stream_producer():
+                try:
+                    uid = "default_user"
+                    sid = str(uuid.uuid4())
+                    sess_result = session_service.create_session(
+                        app_name="qanuni", user_id=uid, session_id=sid,
+                    )
+                    if inspect.iscoroutine(sess_result):
+                        session = await sess_result
+                    else:
+                        session = sess_result
 
-                parts = []
-                async for event in runner_obj.run_async(
-                    user_id=uid, session_id=session.id, new_message=content,
-                ):
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                parts.append(part.text)
-                return parts
+                    content = types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=prompt)],
+                    )
 
-            response_parts = run_async(_stream_agent())
+                    async for event in runner_obj.run_async(
+                        user_id=uid, session_id=session.id, new_message=content,
+                    ):
+                        if event.content and event.content.parts:
+                            for part in event.content.parts:
+                                if part.text:
+                                    token_queue.put(part.text)
+                except Exception as err:
+                    token_queue.put(err)
+                finally:
+                    token_queue.put(None)
+
+            if ev_loop and ev_loop.is_running():
+                asyncio.run_coroutine_threadsafe(_stream_producer(), ev_loop)
+            else:
+                run_async(_stream_producer())
 
             full_response = ""
-            for part_text in response_parts:
-                full_response += part_text
-                yield f"data: {json.dumps({'type': 'token', 'data': part_text}, ensure_ascii=False)}\n\n"
+            while True:
+                try:
+                    item = token_queue.get(timeout=60)
+                except queue.Empty:
+                    break
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    print(f"[!] Streaming producer error: {item}")
+                    break
+                full_response += item
+                yield f"data: {json.dumps({'type': 'token', 'data': item}, ensure_ascii=False)}\n\n"
 
             if not full_response:
                 full_response = "عذراً، مفيش رد متاح دلوقتي."
@@ -693,8 +728,8 @@ def chat_stream():
 
             yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'remaining_messages': new_remaining})}\n\n"
             
-            # Generate follow-up questions for the stream
-            follow_ups = _generate_follow_ups(user_message, full_response, _services.get("generate_text"))
+            # Generate fast follow-up questions for the stream
+            follow_ups = _get_fast_follow_ups(detected_category, user_message)
             yield f"data: {json.dumps({'type': 'follow_ups', 'data': follow_ups}, ensure_ascii=False)}\n\n"
 
         except Exception as e:

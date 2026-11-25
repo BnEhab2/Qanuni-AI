@@ -752,48 +752,69 @@ async function sendMessage() {
                 console.log("[Pipeline] Classified:", category);
             },
             onConfidence(confidence) {
-                ensureAiBubble();
-                renderConfidence(aiContentWrapper, confidence);
+                // Only show confidence badge if there's a warning (low/medium) or warnings list
+                if (!confidence) return;
+                const hasWarnings = confidence.warnings && confidence.warnings.length > 0;
+                const isLow = confidence.confidence_label === "low" || confidence.confidence_label === "medium";
+                if (hasWarnings || isLow) {
+                    ensureAiBubble();
+                    renderConfidence(aiContentWrapper, confidence);
+                }
             },
             onContradictions(contradictions) {
+                if (!contradictions || contradictions.length === 0) return;
                 ensureAiBubble();
                 renderContradictions(aiContentWrapper, contradictions);
             },
             onRisks(risks) {
+                // Only show if there are high-severity risks
+                if (!risks || risks.length === 0) return;
+                const hasHighRisk = risks.some(r => r.risk_level === "high" || r.severity === "high");
+                if (!hasHighRisk) return;
                 ensureAiBubble();
                 renderRisks(aiContentWrapper, risks);
             },
             onProsecution(prosecution) {
+                // Only show if the query is a legal case (has a real argument, not a greeting)
+                if (!prosecution || !prosecution.argument || prosecution.argument.trim().length < 20) return;
                 ensureAiBubble();
                 aiContentWrapper.prosecutionData = prosecution;
                 renderAdvocacy(aiContentWrapper, prosecution, aiContentWrapper.defenseData || null);
             },
             onDefense(defense) {
+                if (!defense || !defense.argument || defense.argument.trim().length < 20) return;
                 ensureAiBubble();
                 aiContentWrapper.defenseData = defense;
                 renderAdvocacy(aiContentWrapper, aiContentWrapper.prosecutionData || null, defense);
             },
             onJudgeDecision(judgeDecision) {
+                if (!judgeDecision || !judgeDecision.verdict) return;
                 ensureAiBubble();
                 renderJudgeDecision(aiContentWrapper, judgeDecision);
             },
             onPipelineStage(stageData) {
-                ensureAiBubble();
-                renderPipelineStages(aiContentWrapper, stageData);
+                // Pipeline stages are internal — don't render to user
             },
             onEntities(entities) {
+                // Entities panel: only show if user asked about a specific case with named parties
+                if (!entities || Object.keys(entities).length === 0) return;
                 ensureAiBubble();
                 renderEntitiesPanel(aiContentWrapper, entities);
             },
             onSuccessProbability(probData) {
+                // Only show if probability is meaningfully different from default (50)
+                if (!probData || probData.probability === undefined) return;
+                if (Math.abs(probData.probability - 50) < 10) return;
                 ensureAiBubble();
                 renderSuccessProbability(aiContentWrapper, probData);
             },
             onTimeline(timelineData) {
+                if (!timelineData || !timelineData.events || timelineData.events.length === 0) return;
                 ensureAiBubble();
                 renderAutoTimeline(aiContentWrapper, timelineData);
             },
             onFollowUps(followUps) {
+                if (!followUps || followUps.length === 0) return;
                 ensureAiBubble();
                 renderFollowUpChips(aiContentWrapper, followUps);
             },
