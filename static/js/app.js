@@ -302,13 +302,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                     appendAiMsg(
                         `📄 **تم الانتهاء من تحليل المستند القانوني:** \`${data.filename}\`\n\nإليك الوقائع والتحليلات الجنائية والمدنية المكتشفة:`,
                         data.retrieved_laws || [],
-                        true, // Save
-                        data.confidence,
-                        data.contradictions,
-                        data.risks,
-                        data.prosecution,
-                        data.defense,
-                        data.judge_decision
+                        true
                     );
                 } else {
                     const err = await res.json();
@@ -591,21 +585,13 @@ function renderMessagesFromServer(messages) {
     DOM.welcomeScreen.style.display = "none";
     DOM.debateSetup.classList.remove("visible");
     
+    let previousQuestion = "";
     messages.forEach(m => {
         if (m.role === "user") {
             appendUserMsg(m.content, false);
+            previousQuestion = m.content || "";
         } else {
-            appendAiMsg(
-                m.content, 
-                m.sources || [], 
-                false, 
-                null, 
-                [], 
-                [], 
-                m.prosecution || null, 
-                m.defense || null, 
-                m.judge_decision || null
-            );
+            appendAiMsg(m.content, m.sources || [], false, previousQuestion);
         }
     });
     scrollToBottom();
@@ -726,6 +712,7 @@ async function sendMessage() {
     let aiMsgElement = null;
     let aiContentWrapper = null;
     let textCollector = "";
+    let responseSources = [];
 
     const payload = {
         message: text,
@@ -745,78 +732,9 @@ async function sendMessage() {
         headers,
         {
             onSources(sources) {
+                responseSources = Array.isArray(sources) ? sources : [];
                 ensureAiBubble();
                 renderSources(sources);
-            },
-            onClassification(category) {
-                console.log("[Pipeline] Classified:", category);
-            },
-            onConfidence(confidence) {
-                // Only show confidence badge if there's a warning (low/medium) or warnings list
-                if (!confidence) return;
-                const hasWarnings = confidence.warnings && confidence.warnings.length > 0;
-                const isLow = confidence.confidence_label === "low" || confidence.confidence_label === "medium";
-                if (hasWarnings || isLow) {
-                    ensureAiBubble();
-                    renderConfidence(aiContentWrapper, confidence);
-                }
-            },
-            onContradictions(contradictions) {
-                if (!contradictions || contradictions.length === 0) return;
-                ensureAiBubble();
-                renderContradictions(aiContentWrapper, contradictions);
-            },
-            onRisks(risks) {
-                // Only show if there are high-severity risks
-                if (!risks || risks.length === 0) return;
-                const hasHighRisk = risks.some(r => r.risk_level === "high" || r.severity === "high");
-                if (!hasHighRisk) return;
-                ensureAiBubble();
-                renderRisks(aiContentWrapper, risks);
-            },
-            onProsecution(prosecution) {
-                // Only show if the query is a legal case (has a real argument, not a greeting)
-                if (!prosecution || !prosecution.argument || prosecution.argument.trim().length < 20) return;
-                ensureAiBubble();
-                aiContentWrapper.prosecutionData = prosecution;
-                renderAdvocacy(aiContentWrapper, prosecution, aiContentWrapper.defenseData || null);
-            },
-            onDefense(defense) {
-                if (!defense || !defense.argument || defense.argument.trim().length < 20) return;
-                ensureAiBubble();
-                aiContentWrapper.defenseData = defense;
-                renderAdvocacy(aiContentWrapper, aiContentWrapper.prosecutionData || null, defense);
-            },
-            onJudgeDecision(judgeDecision) {
-                if (!judgeDecision || !judgeDecision.verdict) return;
-                ensureAiBubble();
-                renderJudgeDecision(aiContentWrapper, judgeDecision);
-            },
-            onPipelineStage(stageData) {
-                // Pipeline stages are internal — don't render to user
-            },
-            onEntities(entities) {
-                // Entities panel: only show if user asked about a specific case with named parties
-                if (!entities || Object.keys(entities).length === 0) return;
-                ensureAiBubble();
-                renderEntitiesPanel(aiContentWrapper, entities);
-            },
-            onSuccessProbability(probData) {
-                // Only show if probability is meaningfully different from default (50)
-                if (!probData || probData.probability === undefined) return;
-                if (Math.abs(probData.probability - 50) < 10) return;
-                ensureAiBubble();
-                renderSuccessProbability(aiContentWrapper, probData);
-            },
-            onTimeline(timelineData) {
-                if (!timelineData || !timelineData.events || timelineData.events.length === 0) return;
-                ensureAiBubble();
-                renderAutoTimeline(aiContentWrapper, timelineData);
-            },
-            onFollowUps(followUps) {
-                if (!followUps || followUps.length === 0) return;
-                ensureAiBubble();
-                renderFollowUpChips(aiContentWrapper, followUps);
             },
             onToken(token) {
                 removeThinking();
@@ -828,6 +746,10 @@ async function sendMessage() {
             onDone(event) {
                 isWaiting = false;
                 updateSendBtn();
+
+                textCollector = prepareLegalAnswer(textCollector, responseSources, text);
+                const answerNode = aiContentWrapper?.querySelector(".msg-content");
+                if (answerNode) answerNode.innerHTML = renderMarkdown(textCollector);
                 
                 // Add message actions to bubble
                 addActionsRow(aiContentWrapper, textCollector);
@@ -885,46 +807,7 @@ async function sendMessage() {
     }
 
     function renderSources(sources) {
-        if (!sources || sources.length === 0) return;
-
-        const srcContainer = document.createElement("div");
-        srcContainer.className = "sources-container";
-        srcContainer.innerHTML = '<div class="sources-label">المصادر القانونية</div>';
-        
-        sources.forEach(s => {
-            const card = document.createElement("div");
-            card.className = "source-card";
-            const isWebSource = s.source === "web_search" || s.retrieval_method === "web_search";
-            const webBadge = isWebSource ? '<span class="source-web-badge">🌐 إنترنت</span>' : '';
-            
-            const cleanLawName = cleanTextGarbage(safeDecodeURI(s.law_name));
-            const cleanArticleNum = s.article_number ? cleanTextGarbage(safeDecodeURI(s.article_number)) : "";
-            const cleanCat = cleanTextGarbage(safeDecodeURI(s.categories || ""));
-            const cleanSnippet = cleanTextGarbage(safeDecodeURI(s.snippet));
-
-            let headerTitle = "";
-            if (cleanArticleNum && cleanArticleNum !== "ويب") {
-                headerTitle = `المادة ${cleanArticleNum} — ${cleanLawName}`;
-            } else {
-                headerTitle = cleanLawName;
-            }
-
-            card.innerHTML = `
-                <div class="source-header">
-                    <span class="source-name">${escapeHtml(headerTitle)}</span>
-                    ${webBadge}
-                    <span class="source-cat">${escapeHtml(cleanCat)}</span>
-                    <svg class="source-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
-                </div>
-                <div class="source-body">
-                    <div class="source-text">${escapeHtml(cleanSnippet)}</div>
-                </div>
-            `;
-            card.querySelector(".source-header").onclick = () => card.classList.toggle("open");
-            srcContainer.appendChild(card);
-        });
-        
-        aiContentWrapper.appendChild(srcContainer);
+        renderLegalReferences(aiContentWrapper, sources);
     }
 }
 
@@ -964,22 +847,7 @@ async function sendDebateMessage(messageText, caseDesc) {
             if (data.session_id) debateSessionId = data.session_id;
             
             if (data.scorecard) {
-                appendAiMsg(
-                    data.answer, 
-                    data.sources || [], 
-                    true, 
-                    null, 
-                    [], 
-                    [], 
-                    null, 
-                    null, 
-                    data.judge_decision
-                );
-                
-                const lastAiRow = DOM.chatMessages.querySelector(".ai-row:last-child .msg-content-wrapper");
-                if (lastAiRow) {
-                    renderScorecard(lastAiRow, data.scorecard);
-                }
+                appendAiMsg(data.answer, data.sources || []);
             } else {
                 appendAiMsg(data.answer, data.sources || []);
             }
@@ -1036,7 +904,63 @@ function appendUserMsg(text, save = true) {
     scrollToBottom();
 }
 
-function appendAiMsg(text, sources = [], save = true, confidence = null, contradictions = [], risks = [], prosecution = null, defense = null, judgeDecision = null) {
+function isLegalQuestionForDisplay(question) {
+    return /قانون|قانوني|المادة|مادة|محكمة|قضية|عقد|جنائي|مدني|حقوق|دعوى|تعويض|إيجار|طلاق|نفقة|عقوبة|تشريع|law|legal|article|court|case|contract|rights/i.test(question || "");
+}
+
+function verifiedLegalArticles(sources) {
+    return (sources || []).map(source => {
+        const citation = String(source.citation || "");
+        const extracted = citation.match(/(?:المادة|مادة)\s*([\d٠-٩]+)/i);
+        return { ...source, display_article_number: source.article_number || (extracted && extracted[1]) || "" };
+    }).filter(source =>
+        source.display_article_number && ["valid", "amended"].includes(String(source.legal_status || "").toLowerCase())
+    );
+}
+
+function prepareLegalAnswer(answer, sources, question) {
+    const cleanAnswer = String(answer || "").replace(/\[LEGAL STATUS:[^\]]*\]\s*/gi, "").trim();
+    if (!isLegalQuestionForDisplay(question) || verifiedLegalArticles(sources).length > 0) return cleanAnswer;
+    return "لم أتمكن من التحقق من مادة قانونية منطبقة على هذه المسألة؛ لذلك لا أورد رقم مادة غير موثّق.";
+}
+
+function renderLegalReferences(wrapper, sources) {
+    const articles = verifiedLegalArticles(sources);
+    if (!wrapper || articles.length === 0) return;
+
+    const section = document.createElement("div");
+    section.className = "sources-container legal-references";
+    const heading = document.createElement("div");
+    heading.className = "sources-label";
+    heading.textContent = "المراجع القانونية";
+    section.appendChild(heading);
+
+    articles.forEach(source => {
+        const item = document.createElement("div");
+        item.className = "legal-reference-item";
+        const article = cleanTextGarbage(safeDecodeURI(source.display_article_number));
+        const law = cleanTextGarbage(safeDecodeURI(source.law_name || ""));
+        const label = document.createElement("span");
+        label.textContent = `المادة ${article}${law ? ` — ${law}` : ""}`;
+        item.appendChild(label);
+
+        const verification = source.legal_verification || {};
+        const url = verification.source_urls?.[0] || source.source_url || source.url ||
+            (/^https?:\/\//i.test(source.citation || "") ? source.citation : "");
+        if (url && /^https?:\/\//i.test(url)) {
+            const link = document.createElement("a");
+            link.href = url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "المصدر";
+            item.appendChild(link);
+        }
+        section.appendChild(item);
+    });
+    wrapper.appendChild(section);
+}
+
+function appendAiMsg(text, sources = [], save = true, question = "") {
     DOM.welcomeScreen.style.display = "none";
     DOM.debateSetup.classList.remove("visible");
 
@@ -1052,121 +976,17 @@ function appendAiMsg(text, sources = [], save = true, confidence = null, contrad
 
     const contentDiv = document.createElement("div");
     contentDiv.className = "msg-content";
-    contentDiv.innerHTML = renderMarkdown(text);
+    const finalText = question ? prepareLegalAnswer(text, sources, question) : String(text || "").replace(/\[LEGAL STATUS:[^\]]*\]\s*/gi, "");
+    contentDiv.innerHTML = renderMarkdown(finalText);
     contentWrapper.appendChild(contentDiv);
+    renderLegalReferences(contentWrapper, sources);
 
-    // Render new elements if provided
-    if (confidence) {
-        renderConfidence(contentWrapper, confidence);
-    }
-    if (contradictions && contradictions.length > 0) {
-        renderContradictions(contentWrapper, contradictions);
-    }
-    if (risks && risks.length > 0) {
-        renderRisks(contentWrapper, risks);
-    }
-
-    // Render Prosecution and Defense if provided
-    if (prosecution || defense) {
-        contentWrapper.prosecutionData = prosecution;
-        contentWrapper.defenseData = defense;
-        renderAdvocacy(contentWrapper, prosecution, defense);
-    }
-
-    // Render Judge Decision if provided
-    if (judgeDecision && judgeDecision.verdict) {
-        renderJudgeDecision(contentWrapper, judgeDecision);
-    }
-
-    if (sources && sources.length > 0) {
-        const srcContainer = document.createElement("div");
-        srcContainer.className = "sources-container";
-        srcContainer.innerHTML = '<div class="sources-label">المصادر القانونية</div>';
-        sources.forEach(s => {
-            const card = document.createElement("div");
-            card.className = "source-card";
-            const isWebSource = s.source === "web_search" || s.retrieval_method === "web_search";
-            const webBadge = isWebSource ? '<span class="source-web-badge">🌐 إنترنت</span>' : '';
-            
-            const cleanLawName = cleanTextGarbage(safeDecodeURI(s.law_name));
-            const cleanArticleNum = s.article_number ? cleanTextGarbage(safeDecodeURI(s.article_number)) : "";
-            const cleanCat = cleanTextGarbage(safeDecodeURI(s.categories || ""));
-            const cleanSnippet = cleanTextGarbage(safeDecodeURI(s.snippet));
-
-            let headerTitle = "";
-            if (cleanArticleNum && cleanArticleNum !== "ويب") {
-                headerTitle = `المادة ${cleanArticleNum} — ${cleanLawName}`;
-            } else {
-                headerTitle = cleanLawName;
-            }
-
-            card.innerHTML = `
-                <div class="source-header">
-                    <span class="source-name">${escapeHtml(headerTitle)}</span>
-                    ${webBadge}
-                    <span class="source-cat">${escapeHtml(cleanCat)}</span>
-                    <svg class="source-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
-                </div>
-                <div class="source-body">
-                    <div class="source-text">${escapeHtml(cleanSnippet)}</div>
-                </div>
-            `;
-            card.querySelector(".source-header").onclick = () => card.classList.toggle("open");
-            srcContainer.appendChild(card);
-        });
-        contentWrapper.appendChild(srcContainer);
-    }
-
-    addActionsRow(contentWrapper, text);
+    addActionsRow(contentWrapper, finalText);
 
     row.appendChild(avatarDiv);
     row.appendChild(contentWrapper);
     DOM.chatMessages.appendChild(row);
     scrollToBottom();
-}
-
-function renderConfidence(wrapper, conf) {
-    if (!conf || conf.overall_confidence === undefined) return;
-    
-    let existing = wrapper.querySelector(".confidence-badge");
-    if (existing) existing.remove();
-    
-    const badge = document.createElement("div");
-    const pct = Math.round(conf.overall_confidence * 100);
-    let badgeClass = "conf-low";
-    let dot = "🔴";
-    
-    if (conf.confidence_label === "high") {
-        badgeClass = "conf-high";
-        dot = "🟢";
-    } else if (conf.confidence_label === "medium") {
-        badgeClass = "conf-medium";
-        dot = "🟡";
-    }
-    
-    badge.className = `confidence-badge ${badgeClass}`;
-    badge.innerHTML = `
-        <span class="conf-dot">${dot}</span>
-        <span class="conf-text">${escapeHtml(conf.confidence_label_ar)} (${pct}%)</span>
-    `;
-    
-    wrapper.insertBefore(badge, wrapper.firstChild);
-
-    // Render warnings if any
-    if (conf.warnings && conf.warnings.length > 0) {
-        let warnDiv = wrapper.querySelector(".confidence-warnings");
-        if (warnDiv) warnDiv.remove();
-        
-        warnDiv = document.createElement("div");
-        warnDiv.className = "confidence-warnings";
-        conf.warnings.forEach(w => {
-            const p = document.createElement("div");
-            p.className = "warning-item";
-            p.textContent = safeDecodeURI(w);
-            warnDiv.appendChild(p);
-        });
-        wrapper.appendChild(warnDiv);
-    }
 }
 
 function renderContradictions(wrapper, contradictions) {
@@ -1584,7 +1404,6 @@ function renderAdvocacy(wrapper, prosecution, defense) {
                 ${articlesHtml ? `<div class="side-articles"><strong>المواد المستند إليها:</strong><ul>${articlesHtml}</ul></div>` : ""}
             </div>
             <div class="side-footer">
-                <span class="side-confidence">قوة القضية: ${Math.round((prosecution.confidence || 0) * 100)}%</span>
                 <span class="side-risk risk-${prosecution.risk_view || 'medium'}">خطورة الجرم: ${riskLabel}</span>
             </div>
         `;
@@ -1611,7 +1430,6 @@ function renderAdvocacy(wrapper, prosecution, defense) {
                 ${articlesHtml ? `<div class="side-articles"><strong>المواد المستند إليها:</strong><ul>${articlesHtml}</ul></div>` : ""}
             </div>
             <div class="side-footer">
-                <span class="side-confidence">ثقة الدفاع: ${Math.round((defense.confidence || 0) * 100)}%</span>
                 <span class="side-risk risk-${defense.risk_view || 'low'}">مستوى الخطر: ${riskLabel}</span>
             </div>
         `;
@@ -1643,7 +1461,6 @@ function renderJudgeDecision(wrapper, decision) {
                 <span class="judge-title">حكم منصة القضاء</span>
                 <span class="judge-verdict-badge verdict-${decision.verdict}">الحكم: ${escapeHtml(safeDecodeURI(decision.verdict_ar || ""))}</span>
             </div>
-            <span class="judge-confidence">ثقة المحكمة: ${Math.round((decision.confidence || 0) * 100)}%</span>
         </div>
         <div class="judge-body">
             <div class="judge-reasoning">
