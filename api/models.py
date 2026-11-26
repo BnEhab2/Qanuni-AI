@@ -246,6 +246,11 @@ def init_db():
                         defense_summary     TEXT,
                         created_at          DOUBLE PRECISION NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS legal_documents (id SERIAL PRIMARY KEY, law_number VARCHAR(80) NOT NULL, law_year VARCHAR(20) NOT NULL, title TEXT DEFAULT '', subject TEXT DEFAULT '', UNIQUE(law_number, law_year));
+                    CREATE TABLE IF NOT EXISTS legal_versions (id SERIAL PRIMARY KEY, document_id INTEGER NOT NULL REFERENCES legal_documents(id), article_number VARCHAR(80) DEFAULT '', text TEXT NOT NULL, version_status VARCHAR(40) NOT NULL DEFAULT 'unverified', valid_from TEXT, valid_until TEXT, publication_date TEXT, effective_date TEXT, source_url TEXT DEFAULT '', verified_at DOUBLE PRECISION, created_at DOUBLE PRECISION NOT NULL);
+                    CREATE TABLE IF NOT EXISTS legal_amendments (id SERIAL PRIMARY KEY, document_id INTEGER NOT NULL REFERENCES legal_documents(id), version_id INTEGER REFERENCES legal_versions(id), relationship VARCHAR(40) NOT NULL, source_url TEXT DEFAULT '', publication_date TEXT, effective_date TEXT, details TEXT DEFAULT '');
+                    CREATE TABLE IF NOT EXISTS legal_updates (id SERIAL PRIMARY KEY, fingerprint VARCHAR(64) UNIQUE NOT NULL, law_number VARCHAR(80) DEFAULT '', law_year VARCHAR(20) DEFAULT '', article_number VARCHAR(80) DEFAULT '', title TEXT DEFAULT '', description TEXT DEFAULT '', source_url TEXT DEFAULT '', discovered_at DOUBLE PRECISION NOT NULL, review_status VARCHAR(30) NOT NULL DEFAULT 'pending', verification_status VARCHAR(30) NOT NULL DEFAULT 'unverified');
                 """)
             else:
                 # SQLite DDL
@@ -348,6 +353,11 @@ def init_db():
                         created_at          REAL NOT NULL,
                         FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
                     );
+
+                    CREATE TABLE IF NOT EXISTS legal_documents (id INTEGER PRIMARY KEY AUTOINCREMENT, law_number TEXT NOT NULL, law_year TEXT NOT NULL, title TEXT DEFAULT '', subject TEXT DEFAULT '', UNIQUE(law_number, law_year));
+                    CREATE TABLE IF NOT EXISTS legal_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL REFERENCES legal_documents(id), article_number TEXT DEFAULT '', text TEXT NOT NULL, version_status TEXT NOT NULL DEFAULT 'unverified', valid_from TEXT, valid_until TEXT, publication_date TEXT, effective_date TEXT, source_url TEXT DEFAULT '', verified_at REAL, created_at REAL NOT NULL);
+                    CREATE TABLE IF NOT EXISTS legal_amendments (id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL REFERENCES legal_documents(id), version_id INTEGER REFERENCES legal_versions(id), relationship TEXT NOT NULL, source_url TEXT DEFAULT '', publication_date TEXT, effective_date TEXT, details TEXT DEFAULT '');
+                    CREATE TABLE IF NOT EXISTS legal_updates (id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT UNIQUE NOT NULL, law_number TEXT DEFAULT '', law_year TEXT DEFAULT '', article_number TEXT DEFAULT '', title TEXT DEFAULT '', description TEXT DEFAULT '', source_url TEXT DEFAULT '', discovered_at REAL NOT NULL, review_status TEXT NOT NULL DEFAULT 'pending', verification_status TEXT NOT NULL DEFAULT 'unverified');
 
                     CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id);
                     CREATE INDEX IF NOT EXISTS idx_conv_guest ON conversations(guest_id);

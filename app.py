@@ -819,4 +819,6 @@ def web_search():
 
 if __name__ == "__main__":
     print(f"\n>>> Qanuni.AI v3.1 — http://localhost:{PORT}")
-    app.run(host="0.0.0.0", port=PORT, debug=True)
+    # The project-local .venv can be watched by Werkzeug and trigger a reload
+    # when dependencies touch files, shutting down active daemon/model threads.
+    app.run(host="0.0.0.0", port=PORT, debug=True, use_reloader=False)

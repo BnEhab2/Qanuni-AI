@@ -22,6 +22,8 @@ def create_app():
     CORS(app, resources={r"/api/*": {"origins": config.ALLOWED_ORIGINS}})
     JWTManager(app)
     init_db()
+    from core.legal_validator import start_update_checker
+    start_update_checker()
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(chat_bp)

@@ -212,6 +212,19 @@ def chat():
                 print(f"[WebSearch] Pre-reasoning search failed: {e}")
         cache.set(cache_key, results, ttl=1800)
 
+    if data.get("force_legal_verification", False) or web_search_enabled:
+        try:
+            from core.legal_validator import validate_retrieved_laws
+            validate_retrieved_laws(results, question=user_message, force=bool(data.get("force_legal_verification", False)))
+            for result in results:
+                if result.get("legal_status") == "unverified":
+                    result["text"] = "[LEGAL STATUS: UNVERIFIED — do not present as definitely current] " + result.get("text", "")
+        except Exception as exc:
+            print(f"[LegalValidator] verification unavailable: {exc}")
+            for result in results:
+                if result.get("source") != "web_search":
+                    result["legal_status"] = "unverified"
+
     deep_reasoner = _services.get("deep_reasoner")
     contradiction_detector = _services.get("contradiction_detector")
     confidence_scorer = _services.get("confidence_scorer")
@@ -324,6 +337,8 @@ def chat():
                 "type": r.get("type", ""),
                 "citation": r.get("citation", format_citation(r)),
                 "article_number": r.get("article_number", ""),
+                "legal_status": r.get("legal_status", "unverified"),
+                "legal_verification": r.get("legal_verification", {}),
                 "snippet": r["text"][:300] + ("…" if len(r["text"]) > 300 else ""),
                 "reranker_score": round(r.get("reranker_score", 0), 4),
                 "retrieval_method": r.get("retrieval_method", ""),
@@ -505,6 +520,19 @@ def chat_stream():
                         print(f"[WebSearch] Pre-reasoning search failed: {e}")
                 cache.set(cache_key, results, ttl=1800)
 
+            if data.get("force_legal_verification", False) or web_search_enabled:
+                try:
+                    from core.legal_validator import validate_retrieved_laws
+                    validate_retrieved_laws(results, question=user_message, force=bool(data.get("force_legal_verification", False)))
+                    for result in results:
+                        if result.get("legal_status") == "unverified":
+                            result["text"] = "[LEGAL STATUS: UNVERIFIED — do not present as definitely current] " + result.get("text", "")
+                except Exception as exc:
+                    print(f"[LegalValidator] verification unavailable: {exc}")
+                    for result in results:
+                        if result.get("source") != "web_search":
+                            result["legal_status"] = "unverified"
+
             # Step: Reasoning stage
             yield f"data: {json.dumps({'type': 'pipeline_stage', 'data': 'reasoning'})}\n\n"
 
@@ -584,6 +612,9 @@ def chat_stream():
                         "categories": r["categories"],
                         "source": r.get("source", ""),
                         "citation": r.get("citation", format_citation(r)),
+                        "article_number": r.get("article_number", ""),
+                        "legal_status": r.get("legal_status", "unverified"),
+                        "legal_verification": r.get("legal_verification", {}),
                         "snippet": r["text"][:300],
                         "reranker_score": round(r.get("reranker_score", 0), 4),
                     })

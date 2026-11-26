@@ -9,6 +9,7 @@ import numpy as np
 import hashlib
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 import chromadb
@@ -155,6 +156,12 @@ class HybridRetriever:
                     "type":     meta.get("type", ""),
                     "summary":  meta.get("summary", ""),
                     "keywords": meta.get("keywords", ""),
+                    "legal_status": meta.get("legal_status", ""),
+                    "valid_from": meta.get("valid_from", ""),
+                    "valid_until": meta.get("valid_until", ""),
+                    "law_number": meta.get("law_number", ""),
+                    "law_year": meta.get("law_year", ""),
+                    "article_number": meta.get("article_number", ""),
                 })
 
             self._bm25 = BM25Okapi(tokenized)
@@ -180,6 +187,32 @@ class HybridRetriever:
         self._ensure_embed_model()
         embedding = self._embed_model.encode(query, normalize_embeddings=True)
         return embedding.tolist()
+
+    def replace_legal_version(self, law_number: str, law_year: str, article_number: str,
+                              text: str, metadata: dict) -> None:
+        """Replace one Chroma article and invalidate BM25 for its lazy refresh."""
+        self._ensure_chroma()
+        where = {"$and": [{"law_number": {"$eq": str(law_number)}},
+                           {"law_year": {"$eq": str(law_year)}},
+                           {"article_number": {"$eq": str(article_number)}}]}
+        old = self._collection.get(where=where, include=["documents", "metadatas"])
+        ids = old.get("ids", [])
+        # Stable id allows atomic upsert for this one legal article.
+        doc_id = ids[0] if ids else f"legal:{law_number}:{law_year}:{article_number}"
+        self._collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata])
+        for old_id in ids[1:]:
+            self._collection.delete(ids=[old_id])
+        with self._bm25_lock:
+            cache_path = Path(CHROMA_DB_PATH) / "bm25_cache.pkl"
+            # rank_bm25 has corpus-wide IDF, so rebuilding 185k entries here would block
+            # approval. Mark it stale and let the existing lazy builder refresh on demand.
+            self._bm25_built = False
+            self._bm25 = None
+            self._bm25_docs = []
+            try:
+                cache_path.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"[Retrieval] BM25 cache invalidation failed: {exc}")
 
     def semantic_search(
         self,
@@ -222,6 +255,8 @@ class HybridRetriever:
                 results["metadatas"][0],
                 results["distances"][0],
             ):
+                if meta.get("legal_status") in {"repealed", "superseded"}:
+                    continue
                 formatted.append({
                     "law_name":   meta.get("title", ""),
                     "categories": meta.get("category", ""),
@@ -232,6 +267,9 @@ class HybridRetriever:
                     "text":       doc,
                     "distance":   dist,
                     "retrieval_method": "semantic",
+                    "legal_status": meta.get("legal_status", ""),
+                    "valid_from": meta.get("valid_from", ""),
+                    "valid_until": meta.get("valid_until", ""),
                 })
 
         return formatted
@@ -277,6 +315,9 @@ class HybridRetriever:
                 break
 
             doc = self._bm25_docs[idx]
+
+            if doc.get("legal_status") in {"repealed", "superseded"}:
+                continue
 
             # Apply metadata filters
             if source_filter and doc.get("source") != source_filter:
