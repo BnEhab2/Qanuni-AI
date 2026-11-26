@@ -101,6 +101,22 @@ def _auto_title(text: str) -> str:
     return clean[:40] + "..." if len(clean) > 40 else clean
 
 
+def _friendly_greeting_reply(message: str) -> str | None:
+    """Return a brief, friendly reply only when the message is just a greeting."""
+    clean = re.sub(r"[^\w\s]", " ", message.casefold())
+    clean = re.sub(r"\s+", " ", clean).strip()
+    english = re.fullmatch(r"(?:h+e+l+o+|h+i+|h+e+y+)(?: there)?|good morning|good afternoon|good evening|how are you", clean)
+    arabic = re.fullmatch(
+        r"(?:السلام عليكم(?: ورحمة الله وبركاته)?|مرحبا|مرحباً|اهلا(?: وسهلا)?|أهلا(?: وسهلا)?|صباح الخير|مساء الخير|ازيك|إزيك|كيف حالك)",
+        clean,
+    )
+    if english:
+        return "Hello! I'm here to help with your Egyptian law questions. What would you like to know?"
+    if arabic:
+        return "أهلًا بيك! عامل إيه؟ أنا معاك، اسألني عن أي موضوع قانوني تحبّه."
+    return None
+
+
 @chat_bp.route("/api/chat", methods=["POST"])
 @rate_limit(max_per_minute=15)
 @require_auth_or_guest
@@ -152,6 +168,27 @@ def chat():
             )
 
     add_message(conversation_id, "user", user_message)
+
+    greeting = _friendly_greeting_reply(user_message)
+    if greeting:
+        add_message(conversation_id, "assistant", greeting)
+        try:
+            memory = _services.get("conversation_memory")
+            if memory:
+                memory.add_turn(session_id, "user", user_message)
+                memory.add_turn(session_id, "assistant", greeting)
+        except Exception as exc:
+            print(f"[Greeting] Conversation memory update failed: {exc}")
+        new_remaining = increment_guest_count()
+        return jsonify({
+            "answer": greeting,
+            "sources": [],
+            "classification": "other",
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "remaining_messages": new_remaining,
+            "follow_ups": [],
+        })
 
     # Get services
     search_laws = _services["search_laws"]
@@ -434,6 +471,7 @@ def chat_stream():
         )
 
     add_message(conversation_id, "user", user_message)
+    greeting = _friendly_greeting_reply(user_message)
 
     def generate():
         search_laws = _services["search_laws"]
@@ -448,6 +486,18 @@ def chat_stream():
         types = _services["types"]
 
         try:
+            if greeting:
+                add_message(conversation_id, "assistant", greeting)
+                try:
+                    conversation_memory.add_turn(session_id, "user", user_message)
+                    conversation_memory.add_turn(session_id, "assistant", greeting)
+                except Exception as exc:
+                    print(f"[Greeting] Conversation memory update failed: {exc}")
+                new_remaining = increment_guest_count()
+                yield f"data: {json.dumps({'type': 'token', 'data': greeting}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id, 'remaining_messages': new_remaining})}\n\n"
+                return
+
             conversation_context = conversation_memory.get_context(session_id)
 
             yield f"data: {json.dumps({'type': 'pipeline_stage', 'data': 'classification'})}\n\n"
